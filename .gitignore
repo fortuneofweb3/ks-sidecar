@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+*.js
+*.js.map
+*.d.ts
+
+# Secrets (NEVER COMMIT)
+.env
+operator-keypair.json
+*-keypair.json
+
+# Local DB
+*.db
+*.sqlite
+*.sqlite3
+*-journal
+
+# Logs
+logs/
+*.log
