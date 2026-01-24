@@ -5,18 +5,22 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
-    "start": "node dist/index.js",
-    "sweep": "ts-node src/index.ts sweep",
-    "scan": "ts-node src/index.ts scan",
-    "analyze": "ts-node src/index.ts analyze",
-    "reclaim": "ts-node src/index.ts reclaim"
+    "start": "node dist/index.js start --claim",
+    "sweep": "node dist/index.js sweep",
+    "stats": "node dist/index.js stats",
+    "activity": "node dist/index.js activity",
+    "config": "node dist/index.js config"
   },
   "dependencies": {
     "@libsql/client": "^0.17.0",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
+    "@types/body-parser": "^1.19.6",
+    "@types/express": "^5.0.6",
+    "body-parser": "^2.2.2",
     "commander": "^14.0.2",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/node": "^25.0.9",

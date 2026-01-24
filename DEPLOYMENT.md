@@ -35,7 +35,7 @@ npm install -g pm2
 
 **Start the Service:**
 ```bash
-pm2 start dist/index.js --name "kora-sidecar" -- monitor
+pm2 start dist/index.js --name "kora-sidecar" -- start --claim
 ```
 
 **Monitor Logs:**

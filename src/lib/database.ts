@@ -83,17 +83,14 @@ export async function initDb(): Promise<void> {
         )
     `);
 
-    // Sponsored Users (Aggregated)
+
+
+    // Whitelist table
     await db.execute(`
-        CREATE TABLE IF NOT EXISTS sponsored_users (
-            wallet TEXT,
-            operator TEXT NOT NULL,
-            first_sponsored_tx TEXT NOT NULL,
-            first_sponsored_slot INTEGER NOT NULL,
-            total_accounts_created INTEGER DEFAULT 0,
-            total_rent_paid INTEGER DEFAULT 0,
-            last_checked_at INTEGER,
-            PRIMARY KEY (wallet, operator)
+        CREATE TABLE IF NOT EXISTS whitelist (
+            address TEXT PRIMARY KEY,
+            note TEXT,
+            created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
         )
     `);
 
@@ -533,3 +530,76 @@ export async function getGlobalCloudStats(): Promise<{
         trackedOperators: Number(row.operator_count || 0),
     };
 }
+
+// ============ Analytics & Config ============
+
+export async function getDetailedAnalytics(operator: string) {
+    const db = getClient();
+    const stats = await db.execute({
+        sql: `
+            SELECT 
+                COUNT(*) as total_accounts,
+                COUNT(DISTINCT user_wallet) as unique_users,
+                SUM(CASE WHEN status = 'closed' OR status = 'reclaimed' THEN rent_paid ELSE 0 END) as total_reclaimed_lamports,
+                COUNT(DISTINCT mint) as unique_mints
+            FROM sponsored_accounts
+            WHERE operator = ?
+        `,
+        args: [operator]
+    });
+
+    const mints = await db.execute({
+        sql: `
+            SELECT mint, COUNT(*) as count 
+            FROM sponsored_accounts 
+            WHERE operator = ? AND mint != ''
+            GROUP BY mint 
+            ORDER BY count DESC 
+            LIMIT 10
+        `,
+        args: [operator]
+    });
+
+    return {
+        ...stats.rows[0],
+        top_mints: mints.rows
+    };
+}
+
+export async function addToWhitelist(address: string, note: string = '') {
+    const db = getClient();
+    await db.execute({
+        sql: 'INSERT OR REPLACE INTO whitelist (address, note) VALUES (?, ?)',
+        args: [address, note]
+    });
+}
+
+export async function removeFromWhitelist(address: string) {
+    const db = getClient();
+    await db.execute({
+        sql: 'DELETE FROM whitelist WHERE address = ?',
+        args: [address]
+    });
+}
+
+export async function getWhitelist(): Promise<string[]> {
+    const db = getClient();
+    const result = await db.execute('SELECT address FROM whitelist');
+    return result.rows.map(r => r.address as string);
+}
+
+export async function getRecentActivity(limit: number): Promise<any[]> {
+    const db = getClient();
+    const result = await db.execute({
+        sql: `
+            SELECT pubkey, rent_paid, last_checked as timestamp
+            FROM sponsored_accounts
+            WHERE status = 'reclaimed' OR status = 'closed'
+            ORDER BY last_checked DESC
+            LIMIT ?
+        `,
+        args: [limit]
+    });
+    return result.rows;
+}
+

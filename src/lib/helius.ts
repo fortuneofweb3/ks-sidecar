@@ -55,9 +55,9 @@ export class HeliusClient {
     private apiKey: string;
     private baseUrl: string;
 
-    constructor(apiKey?: string) {
+    constructor(apiKey?: string, rpcUrl?: string) {
         this.apiKey = apiKey || HELIUS_API_KEY;
-        this.baseUrl = HELIUS_BASE_URL;
+        this.baseUrl = rpcUrl ? rpcUrl.split('?')[0] : HELIUS_BASE_URL;
 
         if (!this.apiKey) {
             console.warn('[Helius] No API key provided. Transactions will fail.');
@@ -162,6 +162,37 @@ export class HeliusClient {
         });
 
         return response.json();
+    }
+
+    /**
+     * Webhook Management
+     */
+    async createWebhook(webhookUrl: string, accountAddresses: string[]): Promise<any> {
+        const url = `https://api.helius.xyz/v0/webhooks?api-key=${this.apiKey}`;
+        const response = await this.fetchWithRetry(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                webhookURL: webhookUrl,
+                transactionTypes: ["Any"],
+                accountAddresses: accountAddresses,
+                webhookType: "enhanced" // Enhanced gives us the rich parsed data we need
+            }),
+        });
+        return response.json();
+    }
+
+    async getWebhooks(): Promise<any[]> {
+        const url = `https://api.helius.xyz/v0/webhooks?api-key=${this.apiKey}`;
+        const response = await this.fetchWithRetry(url);
+        return response.json();
+    }
+
+    async deleteWebhook(webhookId: string): Promise<void> {
+        const url = `https://api.helius.xyz/v0/webhooks/${webhookId}?api-key=${this.apiKey}`;
+        await this.fetchWithRetry(url, {
+            method: 'DELETE',
+        });
     }
 
 

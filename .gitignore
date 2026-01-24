@@ -11,6 +11,7 @@ dist/
 .env
 operator-keypair.json
 *-keypair.json
+!operator-keypair.example.json
 
 # Local DB
 *.db

@@ -85,8 +85,8 @@ export class IncrementalScanner {
 
         console.log(`${this.logPrefix} Initial scan starting...`);
 
-        // Step 1: Fast scan for already empty accounts (silently)
-        await this.fastStatusCheck(true);
+        // Step 1: Fast scan skipped (Fragile RPC calls)
+        // await this.fastStatusCheck(true);
 
         // Step 2: Start historical scan in background
         this.fullScan();
@@ -282,8 +282,8 @@ export class IncrementalScanner {
             console.error(`[Scanner] Upwards update failed: ${e.message}`);
         }
 
-        // 2. Status check: Fast scan and refresh active accounts aggressively
-        await this.fastStatusCheck();
+        // 2. Status check: Refresh active accounts aggressively
+        // await this.fastStatusCheck(); // REMOVED: Fragile RPC call
 
         // ONLY re-verify active accounts if they haven't been checked in the last hour
         // This prevents "Rows Read" from exploding during the 5-minute dashboard refreshes
@@ -315,38 +315,7 @@ export class IncrementalScanner {
         ACTIVE_SCANS.delete(operator);
     }
 
-    /**
-     * Fast Scan: Find ALL token accounts where operator has close authority
-     * This populates 'reclaimable' list instantly from the blockchain
-     */
-    private async fastStatusCheck(silent = true): Promise<void> {
-        if (!silent) console.log(`${this.logPrefix} Running Fast Status Check...`);
-        try {
-            const reclaimable = await this.analyzer.findReclaimableAccountsDirect();
-            if (reclaimable.length > 0) {
-                const operator = this.operatorAddress.toBase58();
-                const toSave: database.SponsoredAccount[] = reclaimable.map(a => ({
-                    pubkey: a.pubkey,
-                    operator,
-                    userWallet: a.userWallet,
-                    mint: '', // We don't get mint from direct scan easily
-                    type: a.type,
-                    rentPaid: a.lamports,
-                    signature: 'DIRECT_SCAN',
-                    slot: 0,
-                    status: 'reclaimable',
-                }));
-                await database.batchUpsertAccounts(toSave);
-                console.log(`[Scanner] Fast Scan stored ${reclaimable.length} reclaimable accounts.`);
-            }
-        } catch (e: any) {
-            if (e.message.includes('Too many accounts')) {
-                console.warn(`[Scanner] Fast Scan skipped: RPC account limit reached. Historical scan will discover accounts instead.`);
-            } else {
-                console.error(`[Scanner] Fast Scan failed: ${e.message}`);
-            }
-        }
-    }
+
 
     /**
      * Verify status of existing 'active' accounts

@@ -9,6 +9,11 @@ import {
 } from '@solana/web3.js';
 import { createCloseAccountInstruction, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { updateAccountStatus, getReclaimableAccounts } from './database';
+import { sendNotification } from './notifier';
+
+// ... imports ...
+
+
 
 const PRIORITY_FEE_MICRO_LAMPORTS = parseInt(process.env.PRIORITY_FEE_MICRO_LAMPORTS || '10000');
 const BATCH_SIZE = parseInt(process.env.RECLAIM_BATCH_SIZE || '15'); // Safe number of instructions per transaction
@@ -206,6 +211,9 @@ export class Reclaimer {
             );
 
             console.log(`[KoraScan] Batch success! Sig: ${signature} | Reclaimed: ${(totalLamports / 1e9).toFixed(4)} SOL`);
+
+            // Send notification (fire and forget)
+            sendNotification(totalLamports / 1e9, validPubkeys.length, signature);
 
             // Update database
             for (const pubkeyStr of validPubkeys) {
