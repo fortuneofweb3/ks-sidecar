@@ -33,7 +33,7 @@ export class Reclaimer {
         this.whitelist = new Set(options.whitelist || []);
 
         if (this.dryRun) {
-            console.log("[KoraScan] 🛡️ DRY RUN ACTIVE - No transactions will be sent.");
+            console.log("[KoraScan] [DRY RUN] ACTIVE - No transactions will be sent.");
         }
     }
 
@@ -48,7 +48,7 @@ export class Reclaimer {
         const whitelistedCount = reclaimableAccounts.length - filtered.length;
 
         if (whitelistedCount > 0) {
-            console.log(`[KoraScan] 🛡️ Ignored ${whitelistedCount} whitelisted accounts.`);
+            console.log(`[KoraScan] Ignored ${whitelistedCount} whitelisted accounts.`);
         }
 
         if (filtered.length === 0) {

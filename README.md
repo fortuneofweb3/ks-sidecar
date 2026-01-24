@@ -1,15 +1,15 @@
-# KoraScan Sidecar (CLI) 🚀
+# KoraScan Sidecar (CLI)
 
 The **Sidecar** is the execution engine of KoraScan. It runs locally on your machine (or server), securely holds your private keys, and performs the actual rent reclamation transactions.
 
-## ✨ Features
+## Features
 
 - **Hybrid Discovery**: Automatic fallback between Turbo Mode (Helius V2) and Standard Crawler.
 - **Zero-Trust Signing**: Keys never leave this process.
 - **Safety First**: Verifies `CloseAuthority` and `Zero Balance` before signing anything.
 - **Local Database**: Uses SQLite to track history without external dependencies.
 
-## 🛠️ Setup Guide (Start Here)
+## Setup Guide (Start Here)
 
 Follow these steps to get your Autoclaimer running in 5 minutes.
 
@@ -54,29 +54,29 @@ node dist/index.js status
 
 ---
 
-## 🏃 Usage
+## Usage
 
-### 🔍 Scan Network
+### Scan Network
 Find accounts where you are the Close Authority.
 ```bash
 # Detects reclaimable accounts and saves to local DB
 node dist/index.js scan
 ```
 
-### 💰 Reclaim Rent
+### Reclaim Rent
 Close the discovered accounts and refund the SOL to your wallet.
 ```bash
 # Process the reclamation queue
 node dist/index.js reclaim
 ```
 
-### 🔄 The "One-Liner" (Sweep)
+### The "One-Liner" (Sweep)
 Run Scan + Reclaim in one go. Perfect for cron jobs.
 ```bash
 node dist/index.js sweep
 ```
 
-### 👁️ Monitoring Mode
+### Monitoring Mode
 Run continuously as a daemon process.
 ```bash
 # Checks every 24 hours (configurable in .env)
@@ -85,11 +85,11 @@ node dist/index.js monitor
 
 ---
 
-## ⚡ Performance Tuning
+## Performance Tuning
 
 | Mode | Trigger | Speed | Reliability |
 | :--- | :--- | :--- | :--- |
-| **Turbo Mode** | `HELIUS_API_KEY` is set | **< 1s** | ⭐⭐⭐⭐⭐ |
-| **Crawler Mode** | Default | **~10 mins** | ⭐⭐⭐⭐ |
+| **Turbo Mode** | `HELIUS_API_KEY` is set | **< 1s** | (Helius V2) |
+| **Crawler Mode** | Default | **~10 mins** | (Universal) |
 
 *We typically recommend a Helius RPC key for best experience.*

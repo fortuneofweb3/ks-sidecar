@@ -189,18 +189,18 @@ program.command('monitor')
                     const result = await reclaimer.reclaimAllEligible();
 
                     const action = options.dryRun ? "Simulated" : "Actual";
-                    console.log(`✅ ${action} reclaim: ${result.success} accounts, SOL: ${result.sol.toFixed(4)}`);
+                    console.log(`[${action}] reclaim: ${result.success} accounts, SOL: ${result.sol.toFixed(4)}`);
                 } else {
-                    console.log(`✅ No reclaimable accounts found.`);
+                    console.log(`No reclaimable accounts found.`);
                 }
             } catch (e: any) {
-                console.error(`❌ Monitor check failed: ${e.message}`);
+                console.error(`Monitor check failed: ${e.message}`);
             }
         };
 
         await runCheck();
         setInterval(runCheck, interval);
-        console.log(`\n👁️ Monitor running. Press Ctrl+C to stop.`);
+        console.log(`\nMonitor running. Press Ctrl+C to stop.`);
     });
 
 program.parse();
