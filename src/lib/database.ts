@@ -501,6 +501,7 @@ export async function getReclaimableAccounts(operator?: string): Promise<Sponsor
 
 export async function getGlobalCloudStats(): Promise<{
     trackedAccounts: number;
+    reclaimedCount: number;
     totalReclaimed: number;
     reclaimableCount: number;
     reclaimableSol: number;
@@ -523,6 +524,7 @@ export async function getGlobalCloudStats(): Promise<{
     const row = result.rows[0];
     return {
         trackedAccounts: Number(row.total || 0),
+        reclaimedCount: Number(row.reclaimed_count || 0),
         totalReclaimed: Number(row.reclaimed_lamports || 0) / 1e9,
         reclaimableCount: Number(row.reclaimable_count || 0),
         reclaimableSol: Number(row.reclaimable_lamports || 0) / 1e9,
