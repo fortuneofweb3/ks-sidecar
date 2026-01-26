@@ -7,27 +7,17 @@
  */
 import { createClient, Client } from '@libsql/client';
 
-// Database Configuration
+// FORCED LOCAL DATABASE FOR SIDECAR
 const LOCAL_DB_PATH = process.env.LOCAL_DB_PATH || 'korascan_local.db';
-const TURSO_URL = process.env.TURSO_DATABASE_URL;
-const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN;
 
 let client: Client | null = null;
 
 export function getClient(): Client {
     if (!client) {
-        if (TURSO_URL && TURSO_TOKEN) {
-            console.log('[Database] Using Turso Cloud');
-            client = createClient({
-                url: TURSO_URL,
-                authToken: TURSO_TOKEN,
-            });
-        } else {
-            console.log(`[Database] Using local SQLite: ${LOCAL_DB_PATH}`);
-            client = createClient({
-                url: `file:${LOCAL_DB_PATH}`,
-            });
-        }
+        console.log(`[Database] Using local SQLite: ${LOCAL_DB_PATH}`);
+        client = createClient({
+            url: `file:${LOCAL_DB_PATH}`,
+        });
     }
     return client;
 }
