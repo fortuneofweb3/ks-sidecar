@@ -60,14 +60,24 @@ export async function initDb(): Promise<void> {
         )
     `);
 
-    // User Settings Table (for telegram)
+    // User Settings Table (for telegram - Notifications)
     await db.execute(`
         CREATE TABLE IF NOT EXISTS user_settings (
             chat_id INTEGER PRIMARY KEY,
-            watched_address TEXT,
+            watched_address TEXT, -- Deprecated, moving to user_watched_wallets
             notify_rent_found BOOLEAN DEFAULT 1,
             notify_rent_claimed BOOLEAN DEFAULT 1,
             notify_all_txs BOOLEAN DEFAULT 0
+        )
+    `);
+
+    // Watched Wallets Table (Multi-wallet support)
+    await db.execute(`
+        CREATE TABLE IF NOT EXISTS user_watched_wallets (
+            chat_id INTEGER,
+            address TEXT,
+            created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+            PRIMARY KEY (chat_id, address)
         )
     `);
 
@@ -119,13 +129,32 @@ export async function initDb(): Promise<void> {
         // columns exist
     }
 
-    // Migration: Add sponsorship_source and memo
     try {
         await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN sponsorship_source TEXT");
         await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN memo TEXT");
         console.log('[Database] Migrated: Added source/memo columns');
     } catch (e) {
         // columns exist
+    }
+
+    // Migration: Move legacy watched_address to new table
+    try {
+        const legacy = await db.execute("SELECT chat_id, watched_address FROM user_settings WHERE watched_address IS NOT NULL");
+        if (legacy.rows.length > 0) {
+            console.log(`[Database] Migrating ${legacy.rows.length} legacy watched addresses...`);
+            for (const row of legacy.rows) {
+                if (row.watched_address) {
+                    await db.execute({
+                        sql: "INSERT OR IGNORE INTO user_watched_wallets (chat_id, address) VALUES (?, ?)",
+                        args: [row.chat_id, row.watched_address]
+                    });
+                }
+            }
+            // Optional: Clear legacy column to avoid confusion, or keep as fallback
+            await db.execute("UPDATE user_settings SET watched_address = NULL");
+        }
+    } catch (e) {
+        console.warn("[Database] Legacy migration warning:", e);
     }
 
     console.log('[Database] Tables initialized');
@@ -417,6 +446,37 @@ export async function toggleNotification(chatId: number, type: 'notify_rent_foun
     await withRetry(() => db.execute({
         sql: `UPDATE user_settings SET ${type} = ? WHERE chat_id = ?`,
         args: [value ? 1 : 0, chatId]
+    }));
+}
+
+export async function getWatchedWallets(chatId: number): Promise<string[]> {
+    const db = getClient();
+    const result = await withRetry(() => db.execute({
+        sql: "SELECT address FROM user_watched_wallets WHERE chat_id = ?",
+        args: [chatId]
+    }));
+    return result.rows.map(r => r.address as string);
+}
+
+export async function addWatchedWallet(chatId: number, address: string): Promise<boolean> {
+    const db = getClient();
+
+    // Check limit
+    const existing = await getWatchedWallets(chatId);
+    if (existing.length >= 5) return false;
+
+    await withRetry(() => db.execute({
+        sql: "INSERT OR IGNORE INTO user_watched_wallets (chat_id, address) VALUES (?, ?)",
+        args: [chatId, address]
+    }));
+    return true;
+}
+
+export async function removeWatchedWallet(chatId: number, address: string): Promise<void> {
+    const db = getClient();
+    await withRetry(() => db.execute({
+        sql: "DELETE FROM user_watched_wallets WHERE chat_id = ? AND address = ?",
+        args: [chatId, address]
     }));
 }
 

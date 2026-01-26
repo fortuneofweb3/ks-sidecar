@@ -64,10 +64,11 @@ program.command('start')
     .option('--claim', 'Enable automatic rent reclamation', false)
     .option('-p, --port <number>', 'Webhook listener port', '3333')
     .option('-i, --interval <hours>', 'Polling interval in hours', process.env.MONITOR_INTERVAL_HOURS || '2')
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
     .action(async (options) => {
         await initDb();
         const connection = new Connection(RPC_URL, 'confirmed');
-        const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
+        const operator = loadKeypair(options.wallet);
         const intervalMs = parseFloat(options.interval) * 60 * 60 * 1000;
 
         console.log(`\n🚀 KoraScan AUTOMATIC MODE started!`);
@@ -121,10 +122,11 @@ program.command('sweep')
     .description('Run a one-time discovery and reclamation pass')
     .option('--claim', 'Execute reclaims after discovery', false)
     .option('--history', 'Use exhaustive history scan', false)
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
     .action(async (options) => {
         await initDb();
         const connection = new Connection(RPC_URL, 'confirmed');
-        const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
+        const operator = loadKeypair(options.wallet);
 
         console.log(`\n🧹 Starting one-time SWEEP...`);
 
@@ -149,9 +151,10 @@ program.command('sweep')
  */
 program.command('stats')
     .description('Show detailed analytics and metrics')
-    .action(async () => {
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .action(async (options) => {
         await initDb();
-        const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
+        const operator = loadKeypair(options.wallet);
         const stats: any = await getDetailedAnalytics(operator.publicKey.toBase58());
 
         const totalReclaimed = stats.total_reclaimed_lamports / LAMPORTS_PER_SOL;
@@ -220,10 +223,11 @@ program.command('activity')
 program.command('export')
     .description('Export full audit log to CSV')
     .option('-o, --output <file>', 'Output filename', 'audit_export.csv')
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
     .action(async (options) => {
         await initDb();
         const { getAllAccounts } = require('./lib/database');
-        const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
+        const operator = loadKeypair(options.wallet);
 
         console.log(`\n📦 Exporting full audit log for ${operator.publicKey.toBase58()}...`);
         const accounts = await getAllAccounts(operator.publicKey.toBase58());
@@ -293,10 +297,11 @@ config.command('whitelist')
 config.command('webhook')
     .description('Setup Helius webhooks')
     .argument('<url>', 'Your public webhook endpoint URL')
-    .action(async (url) => {
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .action(async (url, options) => {
         const { HeliusClient } = require('./lib/helius');
         const helius = new HeliusClient(process.env.HELIUS_API_KEY, RPC_URL);
-        const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
+        const operator = loadKeypair(options.wallet);
 
         console.log(`🛰️ Registering Helius Webhook...`);
         try {
