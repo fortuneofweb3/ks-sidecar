@@ -93,8 +93,10 @@ program.command('start')
             console.log(`\n[${new Date().toLocaleTimeString()}] Starting polling cycle...`);
             try {
                 // Discover via history
+                // Discover via history
                 const scanner = new IncrementalScanner(connection, operator.publicKey);
-                await scanner.scan();
+                // Force verify on every cycle to ensure we catch external closes immediately
+                await scanner.scan({ waitForSync: true, forceVerify: true });
 
                 if (options.claim) {
                     const whitelist = await getMergedWhitelist();
@@ -127,7 +129,7 @@ program.command('sweep')
         console.log(`\n🧹 Starting one-time SWEEP...`);
 
         const scanner = new IncrementalScanner(connection, operator.publicKey);
-        const { stats } = await scanner.scan();
+        const { stats } = await scanner.scan({ waitForSync: true, forceVerify: true });
         console.log(`✅ Scan complete. Tracked: ${stats.totalAccounts}`);
 
         if (options.claim) {
@@ -152,13 +154,28 @@ program.command('stats')
         const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
         const stats: any = await getDetailedAnalytics(operator.publicKey.toBase58());
 
+        const totalReclaimed = stats.total_reclaimed_lamports / LAMPORTS_PER_SOL;
+        const totalFees = stats.total_fees_lamports / LAMPORTS_PER_SOL;
+        const netRecovery = totalReclaimed - totalFees;
+        const totalAccounts = Number(stats.total_accounts);
+
         console.log(`\n📊 KoraScan Operator Analytics`);
         console.log(`================================`);
         console.log(`👤 Operator: ${operator.publicKey.toBase58()}`);
-        console.log(`📦 Total Accounts Sponsored: ${stats.total_accounts}`);
-        console.log(`👥 Unique Users Helped:      ${stats.unique_users}`);
-        console.log(`💎 Unique Tokens Managed:    ${stats.unique_mints}`);
-        console.log(`💰 Total SOL Reclaimed:      ${(stats.total_reclaimed_lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
+        console.log(`📦 Total Accounts Sponsored: ${totalAccounts.toLocaleString()}`);
+        console.log(`   - 🟢 Active:   ${(stats.active_count || 0)}`);
+        console.log(`   - 🔒 Locked:   ${(stats.locked_count || 0)}`);
+        console.log(`   - 💀 Closed:   ${(stats.has_death_cert || 0)} (or external close)`);
+        console.log(`👥 Unique Users Helped:      ${stats.unique_users.toLocaleString()}`);
+        console.log(`\n💰 Financial Audit`);
+        console.log(`--------------------------------`);
+        console.log(`💵 Rent Reclaimed:           ${totalReclaimed.toFixed(4)} SOL`);
+        console.log(`💸 Fees Paid:                ${totalFees.toFixed(4)} SOL`);
+        console.log(`📈 Net Recovery:             ${netRecovery.toFixed(4)} SOL`);
+        console.log(`\n🔍 Data Audit`);
+        console.log(`--------------------------------`);
+        console.log(`📅 Birth Certs (Timestamp):  ${stats.has_birth_cert.toLocaleString()} (${((stats.has_birth_cert / totalAccounts) * 100).toFixed(1)}%)`);
+        console.log(`💀 Death Certs (Reclaimed):  ${stats.has_death_cert.toLocaleString()}`);
 
         if (stats.top_mints && stats.top_mints.length > 0) {
             console.log(`\n🔝 Top Sponsored Mints:`);
@@ -195,6 +212,55 @@ program.command('activity')
             const rent = (row.rent_paid / 1e9).toFixed(5);
             console.log(`[${date}] 💰 Reclaimed ${rent} SOL from ${row.pubkey.slice(0, 8)}...`);
         });
+    });
+
+/**
+ * 5. EXPORT (Data Dump)
+ */
+program.command('export')
+    .description('Export full audit log to CSV')
+    .option('-o, --output <file>', 'Output filename', 'audit_export.csv')
+    .action(async (options) => {
+        await initDb();
+        const { getAllAccounts } = require('./lib/database');
+        const operator = loadKeypair(OPERATOR_KEYPAIR_PATH);
+
+        console.log(`\n📦 Exporting full audit log for ${operator.publicKey.toBase58()}...`);
+        const accounts = await getAllAccounts(operator.publicKey.toBase58());
+
+        if (accounts.length === 0) {
+            console.log("⚠️ No accounts found to export.");
+            return;
+        }
+
+        const keys = [
+            'pubkey', 'userWallet', 'mint', 'status',
+            'initialTimestamp', 'sponsorshipSource', 'memo', 'rentPaid',
+            'reclaimedAt', 'reclaimSignature'
+        ];
+
+        const header = keys.join(',') + '\n';
+        const rows = accounts.map((a: any) => {
+            return keys.map(k => {
+                let val = a[k];
+                if (k === 'initialTimestamp' || k === 'reclaimedAt') {
+                    if (!val) return '';
+                    // Check if it's likely seconds (Helius) or ms (Date.now)
+                    // Helius timestamps are usually 10 digits (seconds), Date.now is 13 (ms)
+                    // If < 1e11 (which is year 1973 in ms), assume seconds and multiply
+                    if (typeof val === 'number' && val < 100000000000) {
+                        val = val * 1000;
+                    }
+                    return new Date(val).toISOString();
+                }
+                if (k === 'rentPaid') return (val / 1e9).toFixed(9);
+                if (val === null || val === undefined) return '';
+                return `"${String(val).replace(/"/g, '""')}"`; // CSV escape
+            }).join(',');
+        }).join('\n');
+
+        fs.writeFileSync(options.output, header + rows);
+        console.log(`✅ Exported ${accounts.length} records to ${options.output}`);
     });
 
 /**

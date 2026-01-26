@@ -102,6 +102,32 @@ export async function initDb(): Promise<void> {
     await db.execute(`CREATE INDEX IF NOT EXISTS idx_fee_operator ON operator_fee_history(operator)`);
     await db.execute(`CREATE INDEX IF NOT EXISTS idx_fee_timestamp ON operator_fee_history(timestamp)`);
 
+    // Migration: Add initial_timestamp if it doesn't exist
+    try {
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN initial_timestamp INTEGER");
+        console.log('[Database] Migrated: Added initial_timestamp column');
+    } catch (e: any) {
+        // Column already exists or other error we can ignore for now
+    }
+
+    // Migration: Add reclaimed_at and reclaim_signature
+    try {
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN reclaimed_at INTEGER");
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN reclaim_signature TEXT");
+        console.log('[Database] Migrated: Added reclaim tracking columns');
+    } catch (e) {
+        // columns exist
+    }
+
+    // Migration: Add sponsorship_source and memo
+    try {
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN sponsorship_source TEXT");
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN memo TEXT");
+        console.log('[Database] Migrated: Added source/memo columns');
+    } catch (e) {
+        // columns exist
+    }
+
     console.log('[Database] Tables initialized');
 }
 
@@ -119,6 +145,11 @@ export interface SponsoredAccount {
     rentPaid: number;
     signature: string;
     slot: number;
+    initialTimestamp?: number;
+    reclaimedAt?: number;
+    reclaimSignature?: string;
+    sponsorshipSource?: string;
+    memo?: string;
     status: string;
 }
 
@@ -139,13 +170,27 @@ export async function upsertSponsoredAccount(account: SponsoredAccount): Promise
     const db = getClient();
     await withRetry(() => db.execute({
         sql: `
-            INSERT INTO sponsored_accounts (pubkey, operator, user_wallet, mint, type, rent_paid, signature, slot, status, last_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sponsored_accounts (
+                pubkey, operator, user_wallet, mint, type, rent_paid, signature, slot, initial_timestamp, 
+                reclaimed_at, reclaim_signature, sponsorship_source, memo, status, last_checked
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pubkey) DO UPDATE SET
                 status = excluded.status,
-                last_checked = excluded.last_checked
+                last_checked = excluded.last_checked,
+                initial_timestamp = COALESCE(excluded.initial_timestamp, initial_timestamp),
+                reclaimed_at = COALESCE(excluded.reclaimed_at, reclaimed_at),
+                reclaim_signature = COALESCE(excluded.reclaim_signature, reclaim_signature),
+                sponsorship_source = COALESCE(excluded.sponsorship_source, sponsorship_source),
+                memo = COALESCE(excluded.memo, memo)
         `,
-        args: [account.pubkey, account.operator, account.userWallet, account.mint, account.type, account.rentPaid, account.signature, account.slot, account.status, Date.now()]
+        args: [
+            account.pubkey, account.operator, account.userWallet, account.mint, account.type,
+            account.rentPaid, account.signature, account.slot, account.initialTimestamp || 0,
+            account.reclaimedAt || null, account.reclaimSignature || null,
+            account.sponsorshipSource || null, account.memo || null,
+            account.status, Date.now()
+        ]
     }));
 }
 
@@ -155,13 +200,27 @@ export async function batchUpsertAccounts(accounts: SponsoredAccount[]): Promise
     const db = getClient();
     const batch = accounts.map(acc => ({
         sql: `
-            INSERT INTO sponsored_accounts (pubkey, operator, user_wallet, mint, type, rent_paid, signature, slot, status, last_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sponsored_accounts (
+                pubkey, operator, user_wallet, mint, type, rent_paid, signature, slot, initial_timestamp, 
+                reclaimed_at, reclaim_signature, sponsorship_source, memo, status, last_checked
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pubkey) DO UPDATE SET
                 status = excluded.status,
-                last_checked = excluded.last_checked
+                last_checked = excluded.last_checked,
+                initial_timestamp = COALESCE(excluded.initial_timestamp, initial_timestamp),
+                reclaimed_at = COALESCE(excluded.reclaimed_at, reclaimed_at),
+                reclaim_signature = COALESCE(excluded.reclaim_signature, reclaim_signature),
+                sponsorship_source = COALESCE(excluded.sponsorship_source, sponsorship_source),
+                memo = COALESCE(excluded.memo, memo)
         `,
-        args: [acc.pubkey, acc.operator, acc.userWallet, acc.mint, acc.type, acc.rentPaid, acc.signature, acc.slot, acc.status, Date.now()]
+        args: [
+            acc.pubkey, acc.operator, acc.userWallet, acc.mint, acc.type,
+            acc.rentPaid, acc.signature, acc.slot, acc.initialTimestamp || 0,
+            acc.reclaimedAt || null, acc.reclaimSignature || null,
+            acc.sponsorshipSource || null, acc.memo || null,
+            acc.status, Date.now()
+        ]
     }));
 
     await withRetry(() => db.batch(batch));
@@ -183,16 +242,51 @@ export async function getAccountsForOperator(operator: string): Promise<Sponsore
         rentPaid: row.rent_paid as number,
         signature: row.signature as string,
         slot: row.slot as number,
+        initialTimestamp: row.initial_timestamp as number,
+        reclaimedAt: row.reclaimed_at as number,
+        reclaimSignature: row.reclaim_signature as string,
+        sponsorshipSource: row.sponsorship_source as string,
+        memo: row.memo as string,
         status: row.status as string,
     }));
 }
 
-export async function updateAccountStatus(pubkey: string, status: string): Promise<void> {
+export async function getAllAccounts(operator: string): Promise<SponsoredAccount[]> {
     const db = getClient();
-    await withRetry(() => db.execute({
-        sql: 'UPDATE sponsored_accounts SET status = ?, last_checked = ? WHERE pubkey = ?',
-        args: [status, Date.now(), pubkey]
+    const result = await withRetry(() => db.execute({
+        sql: 'SELECT * FROM sponsored_accounts WHERE operator = ? ORDER BY initial_timestamp DESC',
+        args: [operator]
     }));
+
+    return result.rows.map(row => ({
+        pubkey: row.pubkey as string,
+        operator: row.operator as string,
+        userWallet: row.user_wallet as string,
+        mint: row.mint as string,
+        type: row.type as string,
+        rentPaid: Number(row.rent_paid || 0),
+        signature: row.signature as string,
+        slot: row.slot as number,
+        initialTimestamp: row.initial_timestamp as number,
+        reclaimedAt: row.reclaimed_at as number,
+        reclaimSignature: row.reclaim_signature as string,
+        sponsorshipSource: row.sponsorship_source as string,
+        memo: row.memo as string,
+        status: row.status as string,
+    }));
+}
+
+export async function updateAccountStatus(pubkey: string, status: string, reclaimedAt?: number, reclaimSignature?: string): Promise<void> {
+    const db = getClient();
+    const sql = reclaimedAt && reclaimSignature
+        ? 'UPDATE sponsored_accounts SET status = ?, last_checked = ?, reclaimed_at = ?, reclaim_signature = ? WHERE pubkey = ?'
+        : 'UPDATE sponsored_accounts SET status = ?, last_checked = ? WHERE pubkey = ?';
+
+    const args = reclaimedAt && reclaimSignature
+        ? [status, Date.now(), reclaimedAt, reclaimSignature, pubkey]
+        : [status, Date.now(), pubkey];
+
+    await withRetry(() => db.execute({ sql, args }));
 }
 
 export async function batchUpdateStatus(pubkeys: string[], status: string): Promise<void> {
@@ -205,15 +299,42 @@ export async function batchUpdateStatus(pubkeys: string[], status: string): Prom
     await withRetry(() => db.batch(batch));
 }
 
-export async function batchUpdateAccountStatuses(updates: { pubkey: string, status: string }[]): Promise<void> {
+export async function batchUpdateAccountMetadata(updates: {
+    pubkey: string,
+    mint?: string,
+    userWallet?: string,
+    status?: string,
+    initialTimestamp?: number,
+    sponsorshipSource?: string,
+    memo?: string
+}[]): Promise<void> {
     if (updates.length === 0) return;
     const db = getClient();
     const batch = updates.map(u => ({
-        sql: 'UPDATE sponsored_accounts SET status = ?, last_checked = ? WHERE pubkey = ?',
-        args: [u.status, Date.now(), u.pubkey]
+        sql: `UPDATE sponsored_accounts SET 
+                mint = COALESCE(NULLIF(?, ''), mint), 
+                user_wallet = COALESCE(NULLIF(?, ''), user_wallet),
+                status = COALESCE(?, status),
+                initial_timestamp = COALESCE(?, initial_timestamp),
+                sponsorship_source = COALESCE(?, sponsorship_source),
+                memo = COALESCE(?, memo),
+                last_checked = ? 
+              WHERE pubkey = ?`,
+        args: [
+            u.mint || '',
+            u.userWallet || '',
+            u.status || null,
+            u.initialTimestamp || null,
+            u.sponsorshipSource || null,
+            u.memo || null,
+            Date.now(),
+            u.pubkey
+        ]
     }));
     await withRetry(() => db.batch(batch));
 }
+
+
 
 export async function getActiveAccountsForOperator(operator: string, limit: number = 100): Promise<SponsoredAccount[]> {
     const db = getClient();
@@ -231,6 +352,7 @@ export async function getActiveAccountsForOperator(operator: string, limit: numb
         rentPaid: row.rent_paid as number,
         signature: row.signature as string,
         slot: row.slot as number,
+        initialTimestamp: row.initial_timestamp as number,
         status: row.status as string,
     }));
 }
@@ -495,6 +617,7 @@ export async function getReclaimableAccounts(operator?: string): Promise<Sponsor
         rentPaid: Number(row.rent_paid || 0),
         signature: row.signature as string,
         slot: row.slot as number,
+        initialTimestamp: row.initial_timestamp as number,
         status: row.status as string,
     }));
 }
@@ -542,8 +665,13 @@ export async function getDetailedAnalytics(operator: string) {
             SELECT 
                 COUNT(*) as total_accounts,
                 COUNT(DISTINCT user_wallet) as unique_users,
-                SUM(CASE WHEN status = 'closed' OR status = 'reclaimed' THEN rent_paid ELSE 0 END) as total_reclaimed_lamports,
-                COUNT(DISTINCT mint) as unique_mints
+                SUM(rent_paid) as total_reclaimed_lamports, -- Actually total INTENT of rent
+                SUM(CASE WHEN status = 'reclaimed' OR status = 'closed' THEN rent_paid ELSE 0 END) as realized_rent,
+                COUNT(DISTINCT mint) as unique_mints,
+                SUM(CASE WHEN sponsorship_source IS NOT NULL THEN 1 ELSE 0 END) as has_birth_cert,
+                SUM(CASE WHEN reclaimed_at IS NOT NULL THEN 1 ELSE 0 END) as has_death_cert,
+                COUNT(CASE WHEN status = 'active' THEN 1 END) as active_count,
+                COUNT(CASE WHEN status = 'locked' THEN 1 END) as locked_count
             FROM sponsored_accounts
             WHERE operator = ?
         `,
@@ -562,9 +690,13 @@ export async function getDetailedAnalytics(operator: string) {
         args: [operator]
     });
 
+    const feeStats = await getOperatorTotalFees(operator);
+
     return {
         ...stats.rows[0],
-        top_mints: mints.rows
+        top_mints: mints.rows,
+        total_fees_lamports: feeStats.totalFeesLamports,
+        tx_count: feeStats.txCount
     };
 }
 

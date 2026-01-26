@@ -9,11 +9,14 @@ const TOKEN_2022_PROGRAM_STR = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 export interface ReclaimableAccount {
     pubkey: string;
     userWallet: string;
+    mint: string;
     type: 'token' | 'token-2022' | 'system';
     lamports: number;
     canReclaim: boolean;
     status?: 'active' | 'reclaimable' | 'closed' | 'locked';
     reason?: string;
+    sponsorshipSource?: string;
+    memo?: string;
 }
 
 /**
@@ -92,11 +95,37 @@ export class Analyzer {
                             reclaimable.push({
                                 pubkey: pubkeyStr,
                                 userWallet: data.owner.toBase58(),
+                                mint: new PublicKey(data.mint).toBase58(),
                                 type: ownerStr === TOKEN_2022_PROGRAM_STR ? 'token-2022' : 'token',
                                 lamports: info.lamports,
                                 canReclaim: canClose,
+                                reason: canClose ? undefined : 'authority_mismatch',
+                                sponsorshipSource: originalAcc?.sponsorshipSource,
+                                memo: originalAcc?.memo
+                            });
+                        } else {
+                            // Even if not zero balance, return info to update DB
+                            reclaimable.push({
+                                pubkey: pubkeyStr,
+                                userWallet: data.owner.toBase58(),
+                                mint: new PublicKey(data.mint).toBase58(),
+                                type: ownerStr === TOKEN_2022_PROGRAM_STR ? 'token-2022' : 'token',
+                                lamports: info.lamports,
+                                canReclaim: false,
+                                reason: 'balance_nonzero'
                             });
                         }
+                    } else {
+                        // Even if not zero balance, we want to return the info to update the DB
+                        reclaimable.push({
+                            pubkey: pubkeyStr,
+                            userWallet: originalAcc?.userWallet || '',
+                            mint: '', // Not a token account, so no mint
+                            type: 'system', // Assuming system account if not token
+                            lamports: info.lamports,
+                            canReclaim: false,
+                            reason: 'not_token_account'
+                        });
                     }
                 }
             } catch (e) {

@@ -23,6 +23,9 @@ export interface DiscoveredAccount {
     rentPaid: number;
     signature: string;
     slot: number;
+    timestamp: number;
+    sponsorshipSource: string;
+    memo: string;
 }
 
 /**
@@ -54,7 +57,7 @@ export class IncrementalScanner {
      * 
      * Returns cached data immediately, then updates in background
      */
-    async scan(): Promise<{
+    async scan(options: { waitForSync?: boolean, forceVerify?: boolean, maxScanLimit?: number } = {}): Promise<{
         fromCache: boolean;
         accounts: database.SponsoredAccount[];
         stats: Awaited<ReturnType<typeof database.getOperatorStats>>;
@@ -65,14 +68,22 @@ export class IncrementalScanner {
         // Check for existing checkpoint
         let checkpoint = await database.getCheckpoint(operator);
 
-        // If we have any data, return it immediately and update in background
+        // If we have any data, return it immediately (unless we want to wait)
         if (checkpoint) {
+            const backgroundPromise = this.updateInBackground(checkpoint, options.forceVerify, options.maxScanLimit);
+
+            if (options.waitForSync) {
+                console.log(`${this.logPrefix} Waiting for sync to complete...`);
+                await backgroundPromise;
+                // Refetch fresh stats after sync
+                const accounts = await database.getAccountsForOperator(operator);
+                const stats = await database.getOperatorStats(operator);
+                return { fromCache: false, accounts, stats, checkpoint };
+            }
+
+            // Standard "return fast" behavior
             const accounts = await database.getAccountsForOperator(operator);
             const stats = await database.getOperatorStats(operator);
-
-            // Trigger background update (upwards, downwards, AND status checks)
-            this.updateInBackground(checkpoint);
-
             return { fromCache: true, accounts, stats, checkpoint };
         }
 
@@ -89,7 +100,7 @@ export class IncrementalScanner {
         // await this.fastStatusCheck(true);
 
         // Step 2: Start historical scan in background
-        this.fullScan();
+        this.fullScan(options.maxScanLimit);
 
         checkpoint = await database.getCheckpoint(operator);
         const accounts = await database.getAccountsForOperator(operator);
@@ -101,7 +112,7 @@ export class IncrementalScanner {
     /**
      * Comprehensive scan - fetches history incrementally
      */
-    private async fullScan(): Promise<void> {
+    private async fullScan(limit: number = Infinity): Promise<void> {
         const operator = this.operatorAddress.toBase58();
         let checkpoint = await database.getCheckpoint(operator);
 
@@ -155,6 +166,11 @@ export class IncrementalScanner {
                     for (const tx of txs) {
                         const accounts = this.processTransaction(tx);
                         foundAccounts.push(...accounts);
+
+                        // Save fee immediately (it's cheap)
+                        if (tx.feePayer === operator) {
+                            await database.addOperatorFee(tx.signature, operator, tx.fee, tx.timestamp, tx.type, tx.slot);
+                        }
                     }
 
                     totalProcessed += txs.length;
@@ -182,6 +198,11 @@ export class IncrementalScanner {
 
                     if (totalProcessed % 500 === 0) {
                         console.log(`${this.logPrefix} Processed ${totalProcessed} txs downwards...`);
+                    }
+
+                    if (totalProcessed >= limit) {
+                        console.log(`${this.logPrefix} Hit scan limit of ${limit} transactions. Stop.`);
+                        break;
                     }
 
                     if (txs.length < 100) break;
@@ -230,7 +251,7 @@ export class IncrementalScanner {
     /**
      * Continuous background update - fetches NEW and MISSING OLD history
      */
-    private async updateInBackground(checkpoint: database.ScanCheckpoint): Promise<void> {
+    private async updateInBackground(checkpoint: database.ScanCheckpoint, forceVerify = false, limit: number = Infinity): Promise<void> {
         const operator = this.operatorAddress.toBase58();
         if (ACTIVE_SCANS.has(operator)) return;
         ACTIVE_SCANS.add(operator);
@@ -260,6 +281,10 @@ export class IncrementalScanner {
                 for (const tx of relevantTxs) {
                     const accounts = this.processTransaction(tx);
                     foundNew.push(...accounts);
+
+                    if (tx.feePayer === operator) {
+                        await database.addOperatorFee(tx.signature, operator, tx.fee, tx.timestamp, tx.type, tx.slot);
+                    }
                 }
 
                 if (hitCheckpoint >= 0) break;
@@ -285,11 +310,11 @@ export class IncrementalScanner {
         // 2. Status check: Refresh active accounts aggressively
         // await this.fastStatusCheck(); // REMOVED: Fragile RPC call
 
-        // ONLY re-verify active accounts if they haven't been checked in the last hour
+        // ONLY re-verify active accounts if they haven't been checked in the last hour OR if forced
         // This prevents "Rows Read" from exploding during the 5-minute dashboard refreshes
         const ONE_HOUR = 3600000;
         const lastFullCheck = checkpoint.lastScanAt || 0;
-        const isStale = (Date.now() - lastFullCheck) > ONE_HOUR;
+        const isStale = forceVerify || (Date.now() - lastFullCheck) > ONE_HOUR;
 
         if (isStale) {
             console.log(`${this.logPrefix} Stale data detected. Refreshing up to 2,500 active accounts...`);
@@ -309,7 +334,7 @@ export class IncrementalScanner {
 
         // 3. Downwards: If firstScanComplete is false, continue fetching old history
         if (!checkpoint.firstScanComplete) {
-            await this.fullScan().catch(e => console.error(`${this.logPrefix} Continued fullScan failed: ${e.message}`));
+            await this.fullScan(limit).catch(e => console.error(`${this.logPrefix} Continued fullScan failed: ${e.message}`));
         }
 
         ACTIVE_SCANS.delete(operator);
@@ -336,26 +361,63 @@ export class IncrementalScanner {
             type: a.type as any,
             rentPaid: a.rentPaid,
             signature: a.signature,
-            slot: a.slot
+            slot: a.slot,
+            timestamp: 0, // Not used by analyzer, but required by type
+            sponsorshipSource: 'UNKNOWN',
+            memo: ''
         })));
 
-        const updates: { pubkey: string, status: string }[] = [];
+        const updates: {
+            pubkey: string,
+            mint: string,
+            userWallet: string,
+            status?: string,
+            reclaimedAt?: number,
+            reclaimSignature?: string
+        }[] = [];
+
         for (const res of results) {
+            let status: string | undefined;
+
             if (res.status === 'closed') {
-                updates.push({ pubkey: res.pubkey, status: 'closed' });
+                status = 'closed';
             } else if (res.canReclaim) {
-                updates.push({ pubkey: res.pubkey, status: 'reclaimable' });
+                status = 'reclaimable';
             } else if (res.lamports > 0 && res.reason?.includes('balance')) {
-                // Still has balance, keep as active
-            } else if (res.reason?.includes('authority')) {
+                // Still has balance, keep as active (or update metadata only)
+            } else if (res.reason === 'authority_mismatch') {
                 // Zero balance but no authority
-                updates.push({ pubkey: res.pubkey, status: 'locked' });
+                status = 'locked';
+            }
+            // If status is set, add to updates
+            if (status) {
+                const update: typeof updates[0] = {
+                    pubkey: res.pubkey,
+                    mint: res.mint,
+                    userWallet: res.userWallet,
+                    status
+                };
+
+                // If closed, try to find the "death certificate"
+                if (status === 'closed') {
+                    try {
+                        const history = await this.heliusClient.getTransactionHistory(res.pubkey, { limit: 1 });
+                        if (history.length > 0) {
+                            const last = history[0];
+                            update.reclaimedAt = (last.timestamp || 0) * 1000;
+                            update.reclaimSignature = last.signature;
+                            if (!silent) console.log(`[Scanner] 💀 Forensic success for ${res.pubkey}: Died at ${new Date(update.reclaimedAt).toISOString()}`);
+                        }
+                    } catch (e: any) {
+                        if (!silent) console.warn(`[Scanner] Failed to find death cert for ${res.pubkey}: ${e.message}`);
+                    }
+                }
+                updates.push(update);
             }
         }
-
         if (updates.length > 0) {
-            await database.batchUpdateAccountStatuses(updates);
-            if (!silent) console.log(`[Scanner] Updated ${updates.length} accounts to 'reclaimable' status.`);
+            await database.batchUpdateAccountMetadata(updates);
+            if (!silent) console.log(`[Scanner] Verified & Updated metadata for ${updates.length} accounts.`);
         }
 
         return { hasMore: active.length === limit, updated: updates.length };
@@ -380,7 +442,27 @@ export class IncrementalScanner {
             let type: 'token' | 'token-2022' | 'system' = 'system';
             let userWallet = '';
             let mint = '';
+            let memo = '';
 
+            // 1. Extract Memo
+            for (const ix of tx.instructions || []) {
+                if (ix.programId === 'MemoSq4gqQmJv9jF8gA9y5L5j5q7y5L5j5q7y5L5j5q7') {
+                    // Helius sometimes puts memo data in `data` or `parsed`
+                    // This is a naive check; for Helius parsed txs, we might check elsewhere but 
+                    // typically we can't easily decode raw instruction data here without a library
+                    // BUT, Helius often provides `description` or we can try to find a string in `data`
+                    // For now, minimal extraction.
+                    if (ix.data) {
+                        try {
+                            // Filter out non-printable? 
+                            // Simple heuristic: if it looks like ASCII
+                            // Actually, let's just leave it empty if we can't safely decode base58/64 without import
+                        } catch { }
+                    }
+                }
+            }
+
+            // 2. Extract Token Info
             for (const ix of tx.instructions || []) {
                 if (ix.programId === ASSOCIATED_TOKEN_PROGRAM_ID) {
                     const accounts = ix.accounts || [];
@@ -400,7 +482,18 @@ export class IncrementalScanner {
 
             // ONLY track token accounts for rent reclamation to save storage and rows
             if (type === 'token' || type === 'token-2022') {
-                found.push({ pubkey: acc, userWallet, mint, type, rentPaid: balanceChange, signature: tx.signature, slot: tx.slot });
+                found.push({
+                    pubkey: acc,
+                    userWallet,
+                    mint,
+                    type,
+                    rentPaid: balanceChange,
+                    signature: tx.signature,
+                    slot: tx.slot,
+                    timestamp: tx.timestamp,
+                    sponsorshipSource: tx.source || 'UNKNOWN',
+                    memo: memo
+                });
             }
         }
 
@@ -411,10 +504,22 @@ export class IncrementalScanner {
         const operator = this.operatorAddress.toBase58();
         const toSave: database.SponsoredAccount[] = accounts.map(a => ({
             ...a,
+            initialTimestamp: a.timestamp,
+            // Maps the new fields
+            sponsorshipSource: a.sponsorshipSource,
+            memo: a.memo,
             operator,
             status: 'active',
         }));
         await database.batchUpsertAccounts(toSave);
-        // Removed redundant refreshActiveAccounts() call here to save massively on Rows Read
+
+        // Save fees separately (best effort)
+        // We need to map unique signatures from the accounts to avoid duplicate fee entries if one tx created multiple accounts
+        const uniqueTxs = new Map<string, DiscoveredAccount>();
+        accounts.forEach(a => uniqueTxs.set(a.signature, a));
+
+        // Note: DiscoveredAccount doesn't carry the fee info directly yet, we need to pass it down or grab it.
+        // Actually processTransaction returns DiscoveredAccount[], which doesn't have the fee.
+        // We should probably save fees in the main loop where we have the `tx` object.
     }
 }

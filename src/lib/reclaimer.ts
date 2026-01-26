@@ -215,9 +215,9 @@ export class Reclaimer {
             // Send notification (fire and forget)
             sendNotification(totalLamports / 1e9, validPubkeys.length, signature);
 
-            // Update database
+            // Update database with detailed audit info
             for (const pubkeyStr of validPubkeys) {
-                await updateAccountStatus(pubkeyStr, 'reclaimed');
+                await updateAccountStatus(pubkeyStr, 'reclaimed', Date.now(), signature);
             }
 
             return {
@@ -237,9 +237,9 @@ export class Reclaimer {
             for (const { pubkey, info } of accounts) {
                 try {
                     const result = await this.reclaimSingle(pubkey, info);
-                    if (result) {
+                    if (result.success) {
                         success++;
-                        sol += info.lamports / 1e9;
+                        sol += result.lamports; // reclaimSingle now returns struct
                     } else {
                         failed++;
                     }
@@ -255,8 +255,8 @@ export class Reclaimer {
     /**
      * Reclaim a single account (fallback for failed batches)
      */
-    private async reclaimSingle(pubkey: PublicKey, info: AccountInfo<Buffer>): Promise<boolean> {
-        if (this.dryRun) return true;
+    private async reclaimSingle(pubkey: PublicKey, info: AccountInfo<Buffer>): Promise<{ success: boolean, lamports: number }> {
+        if (this.dryRun) return { success: true, lamports: info.lamports / 1e9 };
 
         try {
             const tx = new Transaction();
@@ -276,19 +276,19 @@ export class Reclaimer {
                 programId
             ));
 
-            await sendAndConfirmTransaction(
+            const signature = await sendAndConfirmTransaction(
                 this.connection,
                 tx,
                 [this.operatorKeypair],
                 { skipPreflight: true, commitment: 'confirmed' }
             );
 
-            await updateAccountStatus(pubkey.toBase58(), 'reclaimed');
-            return true;
+            await updateAccountStatus(pubkey.toBase58(), 'reclaimed', Date.now(), signature);
+            return { success: true, lamports: info.lamports / 1e9 };
 
         } catch (e: any) {
             console.error(`[KoraScan] Single reclaim failed for ${pubkey.toBase58()}: ${e.message}`);
-            return false;
+            return { success: false, lamports: 0 };
         }
     }
 }
