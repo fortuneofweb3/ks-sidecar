@@ -1,0 +1,6 @@
+{
+    "operators": [
+        "../scripts/keys/test_operator_1.json",
+        "../scripts/keys/test_operator_2.json"
+    ]
+}

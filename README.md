@@ -1,88 +1,75 @@
-# KoraScan Sidecar - Unified Rent Reclaimer
+# KoraScan CLI (Sidecar)
 
-A local-first, privacy-conscious tool for Solana operators to discover and reclaim rent from sponsored accounts.
+The engine behind KoraScan. A powerful, local-first tool for Kora operators to discover and reclaim rent from sponsored accounts.
 
 ## Features
 
-- ⚡ **Real-time Discovery**: Integrated Helius Webhook listener.
-- 🔍 **Exhaustive Scanning**: Incremental transaction history crawler.
+- ⚡ **Optimized Discovery**: Uses `SET_AUTHORITY` transaction history to find 100% of sponsored accounts.
+- 💼 **Multi-Wallet Support**: Manage multiple operator keypairs easily with the `--wallet` flag.
 - 💰 **Automated Reclaiming**: Batch reclamation of empty token accounts.
-- 📊 **Rich Analytics**: Track impact, unique users, and rent recovered.
-- 🛡️ **Whitelist Protection**: Safeguard accounts from accidental closure.
+- 📊 **Local Database**: All data is stored locally in SQLite for privacy and speed.
+- 🛡️ **Safety Checks**: Built-in whitelist and strict validation to prevent accidental reclamation.
 
 ## Quick Start
 
 ### 1. Setup
-Run the setup script to install dependencies and initialize your database:
+Install dependencies:
 ```bash
-chmod +x setup.sh
-./setup.sh
+npm install
 ```
 
 ### 2. Configure
-1.  **Environment**: Edit `.env` with your `HELIUS_API_KEY` and `RPC_URL`.
-2.  **Keypair**: Place your operator JSON keypair at `./operator-keypair.json`.
+Copy `.env.example` to `.env` and add your **HELIUS_API_KEY**:
+```bash
+cp .env.example .env
+```
 
 ### 3. Usage
 
-#### **Autonomous Mode (Recommended)**
-Start the real-time listener and periodic polling in a single process.
+#### **Start Scanning & Reclaiming**
+The primary command. Starts the discovery loop and (optionally) the reclaimer.
+
+**Default (uses `./operator-keypair.json`):**
 ```bash
 npm run dev -- start --claim
 ```
 
-#### **Manual Sweep**
-Perform a single pass of discovery and optionally reclaim.
+**Custom Wallet (Multi-Wallet):**
+Specify a different keypair file to run the bot for another operator.
 ```bash
-# Discovery only
-npm run dev -- sweep
-
-# Discovery + Reclaim
-npm run dev -- sweep --claim
+npm run dev -- start --wallet ./another-wallet.json --claim
 ```
 
-#### **Analytics**
-View your operator's performance and impact.
+**Discovery Only (No Reclaim):**
+Just scans and updates the database without sending transactions.
 ```bash
+npm run dev -- start --wallet ./my-wallet.json
+```
+
+#### **View Analytics**
+Check the performance of your operator(s).
+```bash
+# Default wallet
 npm run dev -- stats
+
+# Specific wallet
+npm run dev -- stats --wallet ./another-wallet.json
 ```
 
-#### **Activity Log**
-View recent reclamation history.
-```bash
-npm run dev -- activity
-```
+## How It Works
 
-#### **Configuration**
-Manage your whitelist or setup Helius webhooks.
-```bash
-# Register webhook with Helius
-npm run dev -- config webhook <your_public_url>/webhook
+1.  **Discovery**: KoraScan queries Helius for your transaction history, specifically looking for `SET_AUTHORITY` transactions where you assigned a Close Authority to your operator. This is the definitive on-chain proof of a sponsored account.
+2.  **Verification**: It checks if those accounts are now empty (0 balance) but still open.
+3.  **Reclamation**: It sends batch transactions to close these accounts and return the rent SOL to your wallet.
 
-# Manage Whitelist
-npm run dev -- config whitelist add <address> "Internal Wallet"
-```
+## Configuration (`.env`)
 
-
-## Configuration Reference (`.env`)
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `DISCORD_WEBHOOK_URL` | Integration URL for reclaim notifications | `""` |
-| `MONITOR_INTERVAL_HOURS` | Frequency of checks in autonomous mode | `2` |
-| `RECLAIM_BATCH_SIZE` | Accounts per transaction (safe range: 10-20) | `15` |
-| `PRIORITY_FEE_MICRO_LAMPORTS` | Fee paid for faster inclusion | `10000` |
-| `DRY_RUN` | If `true`, simulates actions without sending TXs | `false` |
-
-## Commands Overview
-
-| Command | Description |
+| Variable | Description |
 | --- | --- |
-| `start` | Automatic mode (Webhooks + Polling) |
-| `sweep` | Manual one-time discovery pass |
-| `stats` | Detailed operator metrics |
-| `config` | Management of webhooks and whitelist |
-| `init` | Initialize/Reset local database |
+| `HELIUS_API_KEY` | **Required**. Your Helius API key for RPC and History API. |
+| `RPC_URL` | Optional. Custom RPC URL (defaults to Helius). |
+| `DATABASE_URL` | Path to local SQLite DB (default: `file:korascan_local.db`). |
+| `DRY_RUN` | If `true`, simulates actions without sending TXs. |
 
 ---
-**Build for privacy. Built for Solana.**
+**Built for Kora Operators.**

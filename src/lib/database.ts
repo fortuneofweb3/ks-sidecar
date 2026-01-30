@@ -1,25 +1,69 @@
 /**
- * Turso Cloud Database Client
+ * Local SQLite Database Client (libSQL)
  * 
- * Used by both web dashboard and telegram bot.
- * Supports incremental scanning - first scan fetches all, 
- * subsequent scans only fetch new transactions.
+ * Per-operator database support - each operator gets their own DB file.
+ * Format: korascan_<operator-prefix>.db
  */
 import { createClient, Client } from '@libsql/client';
 
-// FORCED LOCAL DATABASE FOR SIDECAR
-const LOCAL_DB_PATH = process.env.LOCAL_DB_PATH || 'korascan_local.db';
+const LOCAL_DB_DIR = process.env.LOCAL_DB_DIR || '.';
 
-let client: Client | null = null;
+// Per-operator client cache
+const clientCache: Map<string, Client> = new Map();
+let currentOperator: string | null = null;
 
-export function getClient(): Client {
-    if (!client) {
-        console.log(`[Database] Using local SQLite: ${LOCAL_DB_PATH}`);
-        client = createClient({
-            url: `file:${LOCAL_DB_PATH}`,
-        });
+/**
+ * Get the short prefix for an operator address (first 6 chars)
+ */
+export function getOperatorPrefix(operator: string): string {
+    return operator.slice(0, 6);
+}
+
+/**
+ * Get or create a client for the specified operator
+ */
+export function getClientForOperator(operator: string): Client {
+    const prefix = getOperatorPrefix(operator);
+
+    if (clientCache.has(prefix)) {
+        return clientCache.get(prefix)!;
     }
+
+    const dbPath = `${LOCAL_DB_DIR}/korascan_${prefix}.db`;
+    console.log(`[Database] Initializing SQLite for operator ${prefix}: ${dbPath}`);
+
+    const client = createClient({
+        url: `file:${dbPath}`,
+    });
+
+    clientCache.set(prefix, client);
+    currentOperator = operator;
     return client;
+}
+
+/**
+ * Set the current operator context (for backward compatibility)
+ */
+export function setCurrentOperator(operator: string): void {
+    currentOperator = operator;
+}
+
+/**
+ * Get the current operator's client (backward compatibility)
+ */
+export function getClient(): Client {
+    if (!currentOperator) {
+        throw new Error('[Database] No operator set. Call setCurrentOperator() or getClientForOperator() first.');
+    }
+    return getClientForOperator(currentOperator);
+}
+
+/**
+ * Initialize database for a specific operator
+ */
+export async function initDbForOperator(operator: string): Promise<void> {
+    setCurrentOperator(operator);
+    await initDb();
 }
 
 export async function initDb(): Promise<void> {
@@ -159,9 +203,6 @@ export async function initDb(): Promise<void> {
 
     console.log('[Database] Tables initialized');
 }
-
-/** @deprecated Use initDb */
-export const initTursoDb = initDb;
 
 // ============ Sponsored Accounts ============
 

@@ -28,8 +28,9 @@ export async function handleHeliusWebhook(req: Request, res: Response, operatorA
             const acc = accData.account;
             const balanceChange = accData.nativeBalanceChange;
 
-            // Kora pattern: Rent sponsorship is typically ~0.002 SOL (2,039,280 lamports)
-            if (balanceChange < 1000000 || balanceChange > 3000000) continue;
+            // Kora pattern: Account rent is typically 2,039,280 lamports for ATAs.
+            // But we accept any positive balance change to avoid missing accounts.
+            if (balanceChange <= 0) continue;
 
             let type: 'token' | 'token-2022' | 'system' = 'system';
             let userWallet = '';

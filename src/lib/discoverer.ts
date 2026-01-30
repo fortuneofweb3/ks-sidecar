@@ -34,14 +34,15 @@ export interface DiscoveredAccount {
 const ACTIVE_SCANS = new Set<string>();
 
 /**
- * IncrementalScanner - Saves to Turso, uses checkpoints for incremental scans
+ * Discoverer - Saves to Local SQLite, uses checkpoints for incremental scans
  */
-export class IncrementalScanner {
+export class Discoverer {
     connection: Connection;
     operatorAddress: PublicKey;
     heliusClient: HeliusClient;
     analyzer: Analyzer;
     private logPrefix: string;
+    private cachedRent: number | null = null;
 
     constructor(connection: Connection, operatorAddress: PublicKey) {
         const opStr = operatorAddress.toBase58();
@@ -49,7 +50,7 @@ export class IncrementalScanner {
         this.operatorAddress = operatorAddress;
         this.heliusClient = new HeliusClient();
         this.analyzer = new Analyzer(connection, operatorAddress, true, this.heliusClient); // SILENT BY DEFAULT
-        this.logPrefix = `[Scanner:${opStr.slice(0, 6)}...]`;
+        this.logPrefix = `[Discoverer:${opStr.slice(0, 6)}...]`;
     }
 
     /**
@@ -96,11 +97,21 @@ export class IncrementalScanner {
 
         console.log(`${this.logPrefix} Initial scan starting...`);
 
-        // Step 1: Fast scan skipped (Fragile RPC calls)
-        // await this.fastStatusCheck(true);
+        // Initialize dynamic rent calculation (Token Account = 165 bytes)
+        if (!this.cachedRent) {
+            try {
+                this.cachedRent = await this.connection.getMinimumBalanceForRentExemption(165);
+            } catch (e) {
+                console.warn(`${this.logPrefix} Failed to fetch rent exemption from RPC. Using standard fallback (2039280).`);
+                this.cachedRent = 2039280;
+            }
+        }
 
-        // Step 2: Start historical scan in background
-        this.fullScan(options.maxScanLimit);
+        // Step 1: Start historical scan (Wait if necessary)
+        const scanTask = this.fullScan(options.maxScanLimit);
+        if (options.waitForSync) {
+            await scanTask;
+        }
 
         checkpoint = await database.getCheckpoint(operator);
         const accounts = await database.getAccountsForOperator(operator);
@@ -108,6 +119,8 @@ export class IncrementalScanner {
 
         return { fromCache: false, accounts, stats, checkpoint };
     }
+
+
 
     /**
      * Comprehensive scan - fetches history incrementally
@@ -133,11 +146,20 @@ export class IncrementalScanner {
 
             console.log(`${this.logPrefix} Fetching historical data...`);
 
+            if (!this.cachedRent) {
+                try {
+                    this.cachedRent = await this.connection.getMinimumBalanceForRentExemption(165);
+                } catch (e) {
+                    this.cachedRent = 2039280;
+                }
+            }
+
             // Start from where we left off (oldestSignature) or the very beginning
             let before: string | undefined = checkpoint?.oldestSignature || undefined;
             let totalProcessed = 0;
             let foundAccounts: DiscoveredAccount[] = [];
 
+            let reachedEnd = false;
             // Track boundaries
             let newestSig: string | null = checkpoint?.newestSignature || null;
             let newestSlot: number | null = checkpoint?.newestSlot || null;
@@ -146,9 +168,14 @@ export class IncrementalScanner {
 
             while (true) {
                 try {
-                    const txs = await this.heliusClient.getTransactionHistory(operator, { limit: 100, before });
+                    // OPTIMIZATION: Use 'SET_AUTHORITY' to ignore noise (transfers/swaps/etc)
+                    const txs = await this.heliusClient.getTransactionHistory(operator, {
+                        limit: 100,
+                        before,
+                        type: 'SET_AUTHORITY'
+                    });
                     if (txs.length === 0) {
-                        console.log(`${this.logPrefix} No historical transactions found for this address on Helius.`);
+                        reachedEnd = true;
                         break;
                     }
 
@@ -179,10 +206,6 @@ export class IncrementalScanner {
                     // Save batch to database
                     if (foundAccounts.length >= 50) {
                         await this.saveAccounts(foundAccounts);
-
-                        // Periodically verify some accounts during the scan
-                        await this.refreshActiveAccounts();
-
                         foundAccounts = [];
 
                         // Periodically update checkpoint during long scans
@@ -205,15 +228,13 @@ export class IncrementalScanner {
                         break;
                     }
 
-                    if (txs.length < 100) break;
+                    // Continue until we get an empty array
                     await new Promise(r => setTimeout(r, 100)); // Rate limiting
                 } catch (e: any) {
                     console.error(`${this.logPrefix} Error during historical scan: ${e.message}`);
                     break; // Stop and save progress
                 }
             }
-
-            ACTIVE_SCANS.delete(operator);
 
             // Save remaining accounts
             if (foundAccounts.length > 0) {
@@ -224,23 +245,20 @@ export class IncrementalScanner {
             const stats = await database.getOperatorStats(operator);
             await database.updateCheckpoint({
                 operator,
-                oldestSignature: oldestSig,
-                newestSignature: newestSig,
-                oldestSlot,
-                newestSlot,
+                oldestSignature: oldestSig || undefined,
+                newestSignature: newestSig || undefined,
+                oldestSlot: oldestSlot || undefined,
+                newestSlot: newestSlot || undefined,
                 totalAccounts: stats.totalAccounts,
                 reclaimableCount: stats.reclaimableAccounts,
                 reclaimableLamports: stats.reclaimableLamports,
                 scanStatus: 'complete',
-                firstScanComplete: before === undefined || totalProcessed === 0 || (totalProcessed % 100 !== 0), // Heuristic
+                firstScanComplete: reachedEnd,
             });
 
-            // If we hit the end of history, mark as complete
-            if (totalProcessed < 100 && totalProcessed > 0) {
-                await database.updateCheckpoint({ operator, firstScanComplete: true });
-            }
+            // Cleanup redundant check (now handled by reachedEnd above)
 
-            console.log(`${this.logPrefix} Historical scan slice complete. ${stats.totalAccounts} accounts total.`);
+            console.log(`${this.logPrefix} Historical scan complete. ${stats.totalAccounts} accounts total.`);
         } catch (e: any) {
             console.error(`${this.logPrefix} Global scan error: ${e.message}`);
         } finally {
@@ -256,7 +274,15 @@ export class IncrementalScanner {
         if (ACTIVE_SCANS.has(operator)) return;
         ACTIVE_SCANS.add(operator);
 
-        // 1. Upwards: Fetch NEW transactions since newestSignature
+        // Upwards: Fetch NEW transactions since newestSignature
+        if (!this.cachedRent) {
+            try {
+                this.cachedRent = await this.connection.getMinimumBalanceForRentExemption(165);
+            } catch (e) {
+                this.cachedRent = 2039280;
+            }
+        }
+
         try {
             let before: string | undefined;
             let foundNew: DiscoveredAccount[] = [];
@@ -264,7 +290,11 @@ export class IncrementalScanner {
             let newNewestSlot = checkpoint.newestSlot;
 
             while (true) {
-                const txs = await this.heliusClient.getTransactionHistory(operator, { limit: 100, before });
+                const txs = await this.heliusClient.getTransactionHistory(operator, {
+                    limit: 100,
+                    before,
+                    type: 'SET_AUTHORITY' // Kora often uses SET_AUTHORITY for sponsorship
+                });
                 if (txs.length === 0) break;
 
                 // Stop if we hit our newest known signature
@@ -307,24 +337,23 @@ export class IncrementalScanner {
             console.error(`[Scanner] Upwards update failed: ${e.message}`);
         }
 
-        // 2. Status check: Refresh active accounts aggressively
-        // await this.fastStatusCheck(); // REMOVED: Fragile RPC call
-
-        // ONLY re-verify active accounts if they haven't been checked in the last hour OR if forced
-        // This prevents "Rows Read" from exploding during the 5-minute dashboard refreshes
+        // 2. ONLY re-verify active accounts if they haven't been checked in the last hour OR if forced
         const ONE_HOUR = 3600000;
         const lastFullCheck = checkpoint.lastScanAt || 0;
         const isStale = forceVerify || (Date.now() - lastFullCheck) > ONE_HOUR;
 
         if (isStale) {
-            console.log(`${this.logPrefix} Stale data detected. Refreshing up to 2,500 active accounts...`);
+            console.log(`${this.logPrefix} Stale data detected. Refreshing active accounts...`);
             let batchesProcessed = 0;
             let totalUpdated = 0;
-            for (let i = 0; i < 5; i++) {
-                const { hasMore, updated } = await this.refreshActiveAccounts(500, true);
+
+            // Limitless refresh (loop until exhausted)
+            while (true) {
+                const { hasMore, updated } = await this.refreshActiveAccounts(1000, true);
                 batchesProcessed++;
                 totalUpdated += updated;
                 if (!hasMore) break;
+                if (batchesProcessed > 100) break; // Safety cap 100k
                 await new Promise(r => setTimeout(r, 200));
             }
             if (totalUpdated > 0) {
@@ -340,19 +369,17 @@ export class IncrementalScanner {
         ACTIVE_SCANS.delete(operator);
     }
 
-
-
     /**
      * Verify status of existing 'active' accounts
      */
     private async refreshActiveAccounts(forceCount?: number, silent = false): Promise<{ hasMore: boolean, updated: number }> {
         const operator = this.operatorAddress.toBase58();
-        const limit = forceCount || 500; // Increased batch size
+        const limit = forceCount || 500;
         const active = await database.getActiveAccountsForOperator(operator, limit);
 
         if (active.length === 0) return { hasMore: false, updated: 0 };
 
-        if (!silent) console.log(`[Scanner] Re-verifying ${active.length} active accounts (Scaling batch)...`);
+        if (!silent) console.log(`[Scanner] Re-verifying ${active.length} active accounts...`);
 
         const results = await this.analyzer.analyzeAccounts(active.map(a => ({
             pubkey: a.pubkey,
@@ -362,7 +389,7 @@ export class IncrementalScanner {
             rentPaid: a.rentPaid,
             signature: a.signature,
             slot: a.slot,
-            timestamp: 0, // Not used by analyzer, but required by type
+            timestamp: 0,
             sponsorshipSource: 'UNKNOWN',
             memo: ''
         })));
@@ -383,22 +410,18 @@ export class IncrementalScanner {
                 status = 'closed';
             } else if (res.canReclaim) {
                 status = 'reclaimable';
-            } else if (res.lamports > 0 && res.reason?.includes('balance')) {
-                // Still has balance, keep as active (or update metadata only)
             } else if (res.reason === 'authority_mismatch') {
-                // Zero balance but no authority
                 status = 'locked';
             }
-            // If status is set, add to updates
+
             if (status) {
-                const update: typeof updates[0] = {
+                const update: any = {
                     pubkey: res.pubkey,
                     mint: res.mint,
                     userWallet: res.userWallet,
                     status
                 };
 
-                // If closed, try to find the "death certificate"
                 if (status === 'closed') {
                     try {
                         const history = await this.heliusClient.getTransactionHistory(res.pubkey, { limit: 1 });
@@ -406,18 +429,15 @@ export class IncrementalScanner {
                             const last = history[0];
                             update.reclaimedAt = (last.timestamp || 0) * 1000;
                             update.reclaimSignature = last.signature;
-                            if (!silent) console.log(`[Scanner] 💀 Forensic success for ${res.pubkey}: Died at ${new Date(update.reclaimedAt).toISOString()}`);
                         }
-                    } catch (e: any) {
-                        if (!silent) console.warn(`[Scanner] Failed to find death cert for ${res.pubkey}: ${e.message}`);
-                    }
+                    } catch { }
                 }
                 updates.push(update);
             }
         }
+
         if (updates.length > 0) {
             await database.batchUpdateAccountMetadata(updates);
-            if (!silent) console.log(`[Scanner] Verified & Updated metadata for ${updates.length} accounts.`);
         }
 
         return { hasMore: active.length === limit, updated: updates.length };
@@ -428,7 +448,11 @@ export class IncrementalScanner {
         const found: DiscoveredAccount[] = [];
 
         if (tx.feePayer !== operatorStr) {
-            // If the user scanned a Program ID, it will never be the fee payer
+            return found;
+        }
+
+        // Only process transactions that actually created accounts or set authorities
+        if (tx.type !== 'CREATE_ACCOUNT' && tx.type !== 'SET_AUTHORITY' && tx.type !== 'UNKNOWN') {
             return found;
         }
 
@@ -436,51 +460,45 @@ export class IncrementalScanner {
             const acc = accData.account;
             const balanceChange = accData.nativeBalanceChange;
 
-            if (balanceChange < 1000000 || balanceChange > 3000000) continue;
+            // DYNAMIC RENT CHECK (NO GUESSSWORK)
+            const rent = this.cachedRent || 2039280; // Fallback to classic rent if not cached
+            const isRentMatch = Math.abs(balanceChange - rent) < 100;
+            if (!isRentMatch) continue;
+
             if (acc === operatorStr || SYSTEM_ADDRESSES.has(acc)) continue;
+
+            console.log(`${this.logPrefix} Potential Kora account detected: ${acc.slice(0, 8)} in tx ${tx.signature.slice(0, 8)}`);
 
             let type: 'token' | 'token-2022' | 'system' = 'system';
             let userWallet = '';
             let mint = '';
-            let memo = '';
 
-            // 1. Extract Memo
             for (const ix of tx.instructions || []) {
-                if (ix.programId === 'MemoSq4gqQmJv9jF8gA9y5L5j5q7y5L5j5q7y5L5j5q7') {
-                    // Helius sometimes puts memo data in `data` or `parsed`
-                    // This is a naive check; for Helius parsed txs, we might check elsewhere but 
-                    // typically we can't easily decode raw instruction data here without a library
-                    // BUT, Helius often provides `description` or we can try to find a string in `data`
-                    // For now, minimal extraction.
-                    if (ix.data) {
-                        try {
-                            // Filter out non-printable? 
-                            // Simple heuristic: if it looks like ASCII
-                            // Actually, let's just leave it empty if we can't safely decode base58/64 without import
-                        } catch { }
-                    }
-                }
-            }
-
-            // 2. Extract Token Info
-            for (const ix of tx.instructions || []) {
-                if (ix.programId === ASSOCIATED_TOKEN_PROGRAM_ID) {
+                // Check multiple creation patterns (Classic ATA and generic InitializeAccount)
+                if ((ix.programId === ASSOCIATED_TOKEN_PROGRAM_ID || ix.programId === TOKEN_PROGRAM_ID || ix.programId === TOKEN_2022_PROGRAM_ID)) {
                     const accounts = ix.accounts || [];
-                    if (accounts.length >= 4 && accounts[1] === acc) {
+                    // Pattern for CreateAssociatedTokenAccount: [payer, ata, owner, mint, system, token...]
+                    if (ix.programId === ASSOCIATED_TOKEN_PROGRAM_ID && accounts.length >= 4 && accounts[1] === acc) {
                         userWallet = accounts[2];
                         mint = accounts[3];
                         type = (accounts[5] === TOKEN_2022_PROGRAM_ID) ? 'token-2022' : 'token';
                         break;
                     }
+                    // Generic pattern might still be here, but SET_AUTHORITY transactions 
+                    // usually have the account in the instructions list if they are relevant.
                 }
             }
 
             if (!userWallet) {
-                const others = (tx.accountData || []).map(a => a.account).filter(a => a !== operatorStr && a !== acc && !SYSTEM_ADDRESSES.has(a));
-                if (others.length > 0) userWallet = others[0];
+                // If we didn't find the ATA instruction, look for the most likely owner (the only other non-system account)
+                const candidate = tx.accountData?.find(a =>
+                    a.account !== operatorStr &&
+                    a.account !== acc &&
+                    !SYSTEM_ADDRESSES.has(a.account)
+                );
+                if (candidate) userWallet = candidate.account;
             }
 
-            // ONLY track token accounts for rent reclamation to save storage and rows
             if (type === 'token' || type === 'token-2022') {
                 found.push({
                     pubkey: acc,
@@ -492,7 +510,7 @@ export class IncrementalScanner {
                     slot: tx.slot,
                     timestamp: tx.timestamp,
                     sponsorshipSource: tx.source || 'UNKNOWN',
-                    memo: memo
+                    memo: ''
                 });
             }
         }
@@ -501,25 +519,34 @@ export class IncrementalScanner {
     }
 
     private async saveAccounts(accounts: DiscoveredAccount[]): Promise<void> {
+        if (accounts.length === 0) return;
         const operator = this.operatorAddress.toBase58();
-        const toSave: database.SponsoredAccount[] = accounts.map(a => ({
-            ...a,
-            initialTimestamp: a.timestamp,
-            // Maps the new fields
-            sponsorshipSource: a.sponsorshipSource,
-            memo: a.memo,
-            operator,
-            status: 'active',
-        }));
+
+        const analyzed = await this.analyzer.analyzeAccounts(accounts);
+        const verified = analyzed.filter(a => a.canReclaim || a.reason === 'authority_mismatch');
+
+        if (verified.length === 0) return;
+
+        console.log(`${this.logPrefix} Verified ${verified.length}/${accounts.length} potential accounts.`);
+
+        const toSave: database.SponsoredAccount[] = verified.map(a => {
+            const original = accounts.find(o => o.pubkey === a.pubkey);
+            return {
+                pubkey: a.pubkey,
+                operator,
+                userWallet: a.userWallet,
+                mint: a.mint,
+                type: a.type as any,
+                rentPaid: a.lamports,
+                signature: original?.signature || 'UNKNOWN',
+                slot: original?.slot || 0,
+                initialTimestamp: original?.timestamp || Date.now(),
+                sponsorshipSource: original?.sponsorshipSource || 'UNKNOWN',
+                memo: original?.memo || '',
+                status: a.canReclaim ? 'reclaimable' : 'locked',
+            };
+        });
+
         await database.batchUpsertAccounts(toSave);
-
-        // Save fees separately (best effort)
-        // We need to map unique signatures from the accounts to avoid duplicate fee entries if one tx created multiple accounts
-        const uniqueTxs = new Map<string, DiscoveredAccount>();
-        accounts.forEach(a => uniqueTxs.set(a.signature, a));
-
-        // Note: DiscoveredAccount doesn't carry the fee info directly yet, we need to pass it down or grab it.
-        // Actually processTransaction returns DiscoveredAccount[], which doesn't have the fee.
-        // We should probably save fees in the main loop where we have the `tx` object.
     }
 }

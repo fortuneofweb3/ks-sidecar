@@ -2,33 +2,70 @@ import 'dotenv/config';
 import { Connection, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { Command } from 'commander';
 import fs from 'fs';
+import path from 'path';
 import {
-    initDb,
-    batchUpsertAccounts,
+    initDbForOperator,
     getOperatorStats,
     getDetailedAnalytics,
     getWhitelist,
     addToWhitelist,
     removeFromWhitelist
 } from './lib/database';
-import { IncrementalScanner } from './lib/incremental-scanner';
+import { Discoverer } from './lib/discoverer';
 import { Reclaimer } from './lib/reclaimer';
-import { Analyzer } from './lib/analyzer';
 
 // Configuration
 const RPC_URL = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
 const OPERATOR_KEYPAIR_PATH = process.env.OPERATOR_KEYPAIR_PATH || './operator-keypair.json';
+const OPERATORS_CONFIG_PATH = process.env.OPERATORS_CONFIG_PATH || './operators.json';
 
 const program = new Command();
 
-function loadKeypair(path: string): Keypair {
+function loadKeypair(keypairPath: string): Keypair {
     try {
-        const secretKey = JSON.parse(fs.readFileSync(path, 'utf-8'));
+        // Resolve relative paths from sidecar directory
+        const resolvedPath = path.isAbsolute(keypairPath)
+            ? keypairPath
+            : path.resolve(__dirname, '..', keypairPath);
+        const secretKey = JSON.parse(fs.readFileSync(resolvedPath, 'utf-8'));
         return Keypair.fromSecretKey(new Uint8Array(secretKey));
     } catch (e) {
-        console.error(`❌ Failed to load keypair from ${path}. Ensure it exists or set OPERATOR_KEYPAIR_PATH.`);
+        console.error(`❌ Failed to load keypair from ${keypairPath}. Ensure it exists.`);
         process.exit(1);
     }
+}
+
+/**
+ * Load operator registry from operators.json
+ */
+function loadOperatorRegistry(): string[] {
+    try {
+        const configPath = path.isAbsolute(OPERATORS_CONFIG_PATH)
+            ? OPERATORS_CONFIG_PATH
+            : path.resolve(__dirname, '..', OPERATORS_CONFIG_PATH);
+        if (fs.existsSync(configPath)) {
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            return config.operators || [];
+        }
+    } catch (e) {
+        console.error(`⚠️ Failed to load operators.json: ${e}`);
+    }
+    return [];
+}
+
+/**
+ * Get operators based on --wallet or --all flag
+ */
+function getOperators(options: { wallet?: string; all?: boolean }): Keypair[] {
+    if (options.all) {
+        const paths = loadOperatorRegistry();
+        if (paths.length === 0) {
+            console.error('❌ No operators in operators.json. Add keypair paths to use --all.');
+            process.exit(1);
+        }
+        return paths.map(p => loadKeypair(p));
+    }
+    return [loadKeypair(options.wallet || OPERATOR_KEYPAIR_PATH)];
 }
 
 async function getMergedWhitelist(): Promise<string[]> {
@@ -43,16 +80,22 @@ async function getMergedWhitelist(): Promise<string[]> {
     return Array.from(new Set([...dbWhitelist, ...fileWhitelist]));
 }
 
+
 program
     .name('korascan')
     .description('KoraScan Sidecar - Unified Solana Rent Reclaimer')
     .version('1.1.0');
 
 program.command('init')
-    .description('Initialize local database')
-    .action(async () => {
-        await initDb();
-        console.log('✅ Local database initialized.');
+    .description('Initialize local database for operator(s)')
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .option('-a, --all', 'Initialize DBs for all operators in operators.json', false)
+    .action(async (options) => {
+        const operators = getOperators(options);
+        for (const operator of operators) {
+            await initDbForOperator(operator.publicKey.toBase58());
+            console.log(`✅ Database initialized for ${operator.publicKey.toBase58().slice(0, 8)}...`);
+        }
     });
 
 /**
@@ -66,9 +109,9 @@ program.command('start')
     .option('-i, --interval <hours>', 'Polling interval in hours', process.env.MONITOR_INTERVAL_HOURS || '2')
     .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
     .action(async (options) => {
-        await initDb();
         const connection = new Connection(RPC_URL, 'confirmed');
-        const operator = loadKeypair(options.wallet);
+        const operator = loadKeypair(options.wallet || OPERATOR_KEYPAIR_PATH);
+        await initDbForOperator(operator.publicKey.toBase58());
         const intervalMs = parseFloat(options.interval) * 60 * 60 * 1000;
 
         console.log(`\n🚀 KoraScan AUTOMATIC MODE started!`);
@@ -94,8 +137,7 @@ program.command('start')
             console.log(`\n[${new Date().toLocaleTimeString()}] Starting polling cycle...`);
             try {
                 // Discover via history
-                // Discover via history
-                const scanner = new IncrementalScanner(connection, operator.publicKey);
+                const scanner = new Discoverer(connection, operator.publicKey);
                 // Force verify on every cycle to ensure we catch external closes immediately
                 await scanner.scan({ waitForSync: true, forceVerify: true });
 
@@ -123,26 +165,42 @@ program.command('sweep')
     .option('--claim', 'Execute reclaims after discovery', false)
     .option('--history', 'Use exhaustive history scan', false)
     .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .option('-a, --all', 'Run sweep for all operators in operators.json', false)
     .action(async (options) => {
-        await initDb();
         const connection = new Connection(RPC_URL, 'confirmed');
-        const operator = loadKeypair(options.wallet);
+        const operators = getOperators(options);
 
-        console.log(`\n🧹 Starting one-time SWEEP...`);
+        let totalReclaimed = 0;
+        let totalAccounts = 0;
 
-        const scanner = new IncrementalScanner(connection, operator.publicKey);
-        const { stats } = await scanner.scan({ waitForSync: true, forceVerify: true });
-        console.log(`✅ Scan complete. Tracked: ${stats.totalAccounts}`);
+        for (const operator of operators) {
+            console.log(`\n🧹 Sweeping operator ${operator.publicKey.toBase58().slice(0, 8)}...`);
+            await initDbForOperator(operator.publicKey.toBase58());
 
-        if (options.claim) {
-            const whitelist = await getMergedWhitelist();
-            const reclaimer = new Reclaimer(connection, operator, { whitelist });
-            const result = await reclaimer.reclaimAllEligible();
-            console.log(`💰 Reclaimed ${result.success} accounts, Total: ${result.sol.toFixed(4)} SOL`);
-        } else {
-            const stats = await getOperatorStats(operator.publicKey.toBase58());
-            console.log(`💰 Reclaimable: ${stats.reclaimableAccounts} (~${(stats.reclaimableLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL)`);
-            console.log(`💡 Run with --claim to recover this rent.`);
+            const scanner = new Discoverer(connection, operator.publicKey);
+            const { stats } = await scanner.scan({ waitForSync: true, forceVerify: true });
+            console.log(`✅ Scan complete. Tracked: ${stats.totalAccounts}`);
+            totalAccounts += stats.totalAccounts;
+
+            if (options.claim) {
+                const whitelist = await getMergedWhitelist();
+                const reclaimer = new Reclaimer(connection, operator, { whitelist });
+                const result = await reclaimer.reclaimAllEligible();
+                console.log(`💰 Reclaimed ${result.success} accounts, Total: ${result.sol.toFixed(4)} SOL`);
+                totalReclaimed += result.sol;
+            } else {
+                const opStats = await getOperatorStats(operator.publicKey.toBase58());
+                console.log(`💰 Reclaimable: ${opStats.reclaimableAccounts} (~${(opStats.reclaimableLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL)`);
+            }
+        }
+
+        if (operators.length > 1) {
+            console.log(`\n📊 TOTAL: ${totalAccounts} accounts across ${operators.length} operators`);
+            if (options.claim) {
+                console.log(`💰 Total Reclaimed: ${totalReclaimed.toFixed(4)} SOL`);
+            } else {
+                console.log(`💡 Run with --claim to recover rent.`);
+            }
         }
     });
 
@@ -152,41 +210,57 @@ program.command('sweep')
 program.command('stats')
     .description('Show detailed analytics and metrics')
     .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .option('-a, --all', 'Show stats for all operators in operators.json', false)
     .action(async (options) => {
-        await initDb();
-        const operator = loadKeypair(options.wallet);
-        const stats: any = await getDetailedAnalytics(operator.publicKey.toBase58());
+        const operators = getOperators(options);
 
-        const totalReclaimed = stats.total_reclaimed_lamports / LAMPORTS_PER_SOL;
-        const totalFees = stats.total_fees_lamports / LAMPORTS_PER_SOL;
-        const netRecovery = totalReclaimed - totalFees;
-        const totalAccounts = Number(stats.total_accounts);
+        let grandTotalAccounts = 0;
+        let grandTotalReclaimed = 0;
 
-        console.log(`\n📊 KoraScan Operator Analytics`);
-        console.log(`================================`);
-        console.log(`👤 Operator: ${operator.publicKey.toBase58()}`);
-        console.log(`📦 Total Accounts Sponsored: ${totalAccounts.toLocaleString()}`);
-        console.log(`   - 🟢 Active:   ${(stats.active_count || 0)}`);
-        console.log(`   - 🔒 Locked:   ${(stats.locked_count || 0)}`);
-        console.log(`   - 💀 Closed:   ${(stats.has_death_cert || 0)} (or external close)`);
-        console.log(`👥 Unique Users Helped:      ${stats.unique_users.toLocaleString()}`);
-        console.log(`\n💰 Financial Audit`);
-        console.log(`--------------------------------`);
-        console.log(`💵 Rent Reclaimed:           ${totalReclaimed.toFixed(4)} SOL`);
-        console.log(`💸 Fees Paid:                ${totalFees.toFixed(4)} SOL`);
-        console.log(`📈 Net Recovery:             ${netRecovery.toFixed(4)} SOL`);
-        console.log(`\n🔍 Data Audit`);
-        console.log(`--------------------------------`);
-        console.log(`📅 Birth Certs (Timestamp):  ${stats.has_birth_cert.toLocaleString()} (${((stats.has_birth_cert / totalAccounts) * 100).toFixed(1)}%)`);
-        console.log(`💀 Death Certs (Reclaimed):  ${stats.has_death_cert.toLocaleString()}`);
+        for (const operator of operators) {
+            await initDbForOperator(operator.publicKey.toBase58());
+            const stats: any = await getDetailedAnalytics(operator.publicKey.toBase58());
 
-        if (stats.top_mints && stats.top_mints.length > 0) {
-            console.log(`\n🔝 Top Sponsored Mints:`);
-            stats.top_mints.forEach((m: any) => {
-                console.log(` - ${m.mint.slice(0, 8)}... : ${m.count} accounts`);
-            });
+            const totalReclaimed = stats.total_reclaimed_lamports / LAMPORTS_PER_SOL;
+            const totalFees = stats.total_fees_lamports / LAMPORTS_PER_SOL;
+            const netRecovery = totalReclaimed - totalFees;
+            const totalAccounts = Number(stats.total_accounts);
+
+            grandTotalAccounts += totalAccounts;
+            grandTotalReclaimed += totalReclaimed;
+
+            console.log(`\n📊 KoraScan Operator Analytics`);
+            console.log(`================================`);
+            console.log(`👤 Operator: ${operator.publicKey.toBase58()}`);
+            console.log(`📦 Total Accounts Sponsored: ${totalAccounts.toLocaleString()}`);
+            console.log(`   - 🟢 Active:   ${(stats.active_count || 0)}`);
+            console.log(`   - 🔒 Locked:   ${(stats.locked_count || 0)}`);
+            console.log(`   - 💀 Closed:   ${(stats.has_death_cert || 0)} (or external close)`);
+            console.log(`👥 Unique Users Helped:      ${stats.unique_users.toLocaleString()}`);
+            console.log(`\n💰 Financial Audit`);
+            console.log(`--------------------------------`);
+            console.log(`💵 Rent Reclaimed:           ${totalReclaimed.toFixed(4)} SOL`);
+            console.log(`💸 Fees Paid:                ${totalFees.toFixed(4)} SOL`);
+            console.log(`📈 Net Recovery:             ${netRecovery.toFixed(4)} SOL`);
+            console.log(`\n🔍 Data Audit`);
+            console.log(`--------------------------------`);
+            const birthCert = stats.has_birth_cert || 0;
+            const deathCert = stats.has_death_cert || 0;
+            console.log(`📅 Birth Certs (Timestamp):  ${birthCert.toLocaleString()} (${totalAccounts > 0 ? ((birthCert / totalAccounts) * 100).toFixed(1) : 0}%)`);
+            console.log(`💀 Death Certs (Reclaimed):  ${deathCert.toLocaleString()}`);
+
+            if (stats.top_mints && stats.top_mints.length > 0) {
+                console.log(`\n🔝 Top Sponsored Mints:`);
+                stats.top_mints.forEach((m: any) => {
+                    console.log(` - ${m.mint.slice(0, 8)}... : ${m.count} accounts`);
+                });
+            }
         }
 
+        if (operators.length > 1) {
+            console.log(`\n════════════════════════════════`);
+            console.log(`📊 GRAND TOTAL: ${grandTotalAccounts} accounts, ${grandTotalReclaimed.toFixed(4)} SOL reclaimed`);
+        }
     });
 
 /**
@@ -195,26 +269,31 @@ program.command('stats')
 program.command('activity')
     .description('Show recent reclamation activity')
     .option('-n, --number <count>', 'Number of entries to show', '20')
+    .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .option('-a, --all', 'Show activity for all operators in operators.json', false)
     .action(async (options) => {
-        await initDb();
         const { getRecentActivity } = require('./lib/database');
+        const operators = getOperators(options);
         const limit = parseInt(options.number);
 
-        const activity = await getRecentActivity(limit);
+        for (const operator of operators) {
+            await initDbForOperator(operator.publicKey.toBase58());
+            const activity = await getRecentActivity(limit);
 
-        console.log(`\n📜 Recent Activity Log`);
-        console.log(`======================`);
+            console.log(`\n📜 Activity Log for ${operator.publicKey.toBase58().slice(0, 8)}...`);
+            console.log(`======================`);
 
-        if (activity.length === 0) {
-            console.log("No activity recorded yet.");
-            return;
+            if (activity.length === 0) {
+                console.log("No activity recorded yet.");
+                continue;
+            }
+
+            activity.forEach((row: any) => {
+                const date = new Date(row.timestamp).toLocaleString();
+                const rent = (row.rent_paid / 1e9).toFixed(5);
+                console.log(`[${date}] 💰 Reclaimed ${rent} SOL from ${row.pubkey.slice(0, 8)}...`);
+            });
         }
-
-        activity.forEach((row: any) => {
-            const date = new Date(row.timestamp).toLocaleString();
-            const rent = (row.rent_paid / 1e9).toFixed(5);
-            console.log(`[${date}] 💰 Reclaimed ${rent} SOL from ${row.pubkey.slice(0, 8)}...`);
-        });
     });
 
 /**
@@ -224,47 +303,58 @@ program.command('export')
     .description('Export full audit log to CSV')
     .option('-o, --output <file>', 'Output filename', 'audit_export.csv')
     .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .option('-a, --all', 'Export logs for all operators in operators.json', false)
     .action(async (options) => {
-        await initDb();
         const { getAllAccounts } = require('./lib/database');
-        const operator = loadKeypair(options.wallet);
+        const operators = getOperators(options);
+        let totalExported = 0;
 
-        console.log(`\n📦 Exporting full audit log for ${operator.publicKey.toBase58()}...`);
-        const accounts = await getAllAccounts(operator.publicKey.toBase58());
+        for (const operator of operators) {
+            await initDbForOperator(operator.publicKey.toBase58());
+            const prefix = operator.publicKey.toBase58().slice(0, 8);
+            const outputFile = operators.length > 1
+                ? options.output.replace('.csv', `_${prefix}.csv`)
+                : options.output;
 
-        if (accounts.length === 0) {
-            console.log("⚠️ No accounts found to export.");
-            return;
+            console.log(`\n📦 Exporting audit log for ${prefix}...`);
+            const accounts = await getAllAccounts(operator.publicKey.toBase58());
+
+            if (accounts.length === 0) {
+                console.log("⚠️ No accounts found to export.");
+                continue;
+            }
+
+            const keys = [
+                'pubkey', 'userWallet', 'mint', 'status',
+                'initialTimestamp', 'sponsorshipSource', 'memo', 'rentPaid',
+                'reclaimedAt', 'reclaimSignature'
+            ];
+
+            const header = keys.join(',') + '\n';
+            const rows = accounts.map((a: any) => {
+                return keys.map(k => {
+                    let val = a[k];
+                    if (k === 'initialTimestamp' || k === 'reclaimedAt') {
+                        if (!val) return '';
+                        if (typeof val === 'number' && val < 100000000000) {
+                            val = val * 1000;
+                        }
+                        return new Date(val).toISOString();
+                    }
+                    if (k === 'rentPaid') return (val / 1e9).toFixed(9);
+                    if (val === null || val === undefined) return '';
+                    return `"${String(val).replace(/"/g, '""')}"`;
+                }).join(',');
+            }).join('\n');
+
+            fs.writeFileSync(outputFile, header + rows);
+            console.log(`✅ Exported ${accounts.length} records to ${outputFile}`);
+            totalExported += accounts.length;
         }
 
-        const keys = [
-            'pubkey', 'userWallet', 'mint', 'status',
-            'initialTimestamp', 'sponsorshipSource', 'memo', 'rentPaid',
-            'reclaimedAt', 'reclaimSignature'
-        ];
-
-        const header = keys.join(',') + '\n';
-        const rows = accounts.map((a: any) => {
-            return keys.map(k => {
-                let val = a[k];
-                if (k === 'initialTimestamp' || k === 'reclaimedAt') {
-                    if (!val) return '';
-                    // Check if it's likely seconds (Helius) or ms (Date.now)
-                    // Helius timestamps are usually 10 digits (seconds), Date.now is 13 (ms)
-                    // If < 1e11 (which is year 1973 in ms), assume seconds and multiply
-                    if (typeof val === 'number' && val < 100000000000) {
-                        val = val * 1000;
-                    }
-                    return new Date(val).toISOString();
-                }
-                if (k === 'rentPaid') return (val / 1e9).toFixed(9);
-                if (val === null || val === undefined) return '';
-                return `"${String(val).replace(/"/g, '""')}"`; // CSV escape
-            }).join(',');
-        }).join('\n');
-
-        fs.writeFileSync(options.output, header + rows);
-        console.log(`✅ Exported ${accounts.length} records to ${options.output}`);
+        if (operators.length > 1) {
+            console.log(`\n📊 Total exported: ${totalExported} records across ${operators.length} operators`);
+        }
     });
 
 /**
@@ -274,22 +364,30 @@ const config = program.command('config').description('Manage configuration and s
 
 config.command('whitelist')
     .description('Manage address whitelist')
+    .option('-w, --wallet <path>', 'Path to operator keypair file (required for whitelist operations)')
     .argument('<action>', 'add, remove, or list')
     .argument('[address]', 'Solana address')
     .argument('[note]', 'Optional note for the address')
-    .action(async (action, address, note) => {
-        await initDb();
+    .action(async (action, address, note, options) => {
+        // Whitelist needs an operator context for DB
+        if (!options.wallet) {
+            console.error('❌ Whitelist requires --wallet to specify operator DB.');
+            process.exit(1);
+        }
+        const operator = loadKeypair(options.wallet);
+        await initDbForOperator(operator.publicKey.toBase58());
+
         if (action === 'add') {
             if (!address) return console.error('❌ Address required');
             await addToWhitelist(address, note);
-            console.log(`✅ Added ${address} to whitelist.`);
+            console.log(`✅ Added ${address} to whitelist for ${operator.publicKey.toBase58().slice(0, 8)}...`);
         } else if (action === 'remove') {
             if (!address) return console.error('❌ Address required');
             await removeFromWhitelist(address);
             console.log(`✅ Removed ${address} from whitelist.`);
         } else {
             const list = await getWhitelist();
-            console.log(`📋 Whitelisted Addresses:`);
+            console.log(`📋 Whitelisted Addresses for ${operator.publicKey.toBase58().slice(0, 8)}...`);
             list.forEach(a => console.log(` - ${a}`));
         }
     });

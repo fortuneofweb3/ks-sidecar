@@ -1,6 +1,6 @@
 import { Connection, PublicKey, GetProgramAccountsFilter } from '@solana/web3.js';
 import { AccountLayout, ACCOUNT_SIZE, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
-import { DiscoveredAccount } from './incremental-scanner';
+import { DiscoveredAccount } from './discoverer';
 import { HeliusClient } from './helius';
 
 const TOKEN_PROGRAM_STR = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
@@ -77,6 +77,7 @@ export class Analyzer {
 
                     if (!info) {
                         closed++;
+                        if (!this.silent) console.log(`  [CLOSED] ${pubkeyStr.slice(0, 8)}... | Account no longer exists on-chain.`);
                         continue;
                     }
 
@@ -85,6 +86,7 @@ export class Analyzer {
 
                     if (isToken && info.data.length >= ACCOUNT_SIZE) {
                         const data = AccountLayout.decode(Uint8Array.from(info.data.slice(0, ACCOUNT_SIZE)));
+
                         const isZeroBalance = data.amount === 0n;
                         const closeAuthority = data.closeAuthorityOption === 1
                             ? new PublicKey(data.closeAuthority).toBase58()
@@ -103,6 +105,13 @@ export class Analyzer {
                                 sponsorshipSource: originalAcc?.sponsorshipSource,
                                 memo: originalAcc?.memo
                             });
+                            if (!this.silent) {
+                                if (canClose) {
+                                    console.log(`  [RECLAIMABLE] ${pubkeyStr.slice(0, 8)}... | balance=0, closeAuth=operator | ~${(info.lamports / 1e9).toFixed(4)} SOL`);
+                                } else {
+                                    console.log(`  [SKIP] ${pubkeyStr.slice(0, 8)}... | Reason: AUTHORITY_MISMATCH | closeAuth != operator`);
+                                }
+                            }
                         } else {
                             // Even if not zero balance, return info to update DB
                             reclaimable.push({
@@ -114,6 +123,7 @@ export class Analyzer {
                                 canReclaim: false,
                                 reason: 'balance_nonzero'
                             });
+                            if (!this.silent) console.log(`  [SKIP] ${pubkeyStr.slice(0, 8)}... | Reason: NON_ZERO_BALANCE | Account still holds tokens`);
                         }
                     } else {
                         // Even if not zero balance, we want to return the info to update the DB

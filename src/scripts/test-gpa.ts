@@ -1,7 +1,7 @@
 
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getClient } from '../lib/database';
-import { IncrementalScanner } from '../lib/incremental-scanner';
+import { Discoverer } from '../lib/discoverer';
 
 async function main() {
     // 1. Get Operator from DB
@@ -20,8 +20,8 @@ async function main() {
     const connection = new Connection(RPC_URL);
     const operator = new PublicKey(operatorStr);
 
-    // 2. Instantiate the Scanner (Our "Current Approach")
-    const scanner = new IncrementalScanner(connection, operator);
+    // 2. Instantiate the Discoverer (Our "Current Approach")
+    const scanner = new Discoverer(connection, operator);
 
     console.log(`\n⚡ Running Incremental Scan...`);
     const startTime = Date.now();
