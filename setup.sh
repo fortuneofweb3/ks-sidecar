@@ -20,7 +20,13 @@ if [ ! -f .env ]; then
     echo "⚠️  Please edit .env and add your HELIUS_API_KEY and RPC_URL."
 fi
 
-# 4. Initialize Database
+# 4. Initialize Multi-Wallet Config
+if [ ! -f operators.json ]; then
+    echo "📋 Creating operators.json template..."
+    echo '{ "operators": [] }' > operators.json
+fi
+
+# 5. Initialize Database
 echo "🗄️ Initializing local database..."
 npm run dev -- init
 
@@ -28,6 +34,7 @@ echo ""
 echo "✅ Setup complete!"
 echo "----------------"
 echo "Next steps:"
-echo "1. Edit .env with your keys"
-echo "2. Place your operator keypair JSON at ./operator-keypair.json"
-echo "3. Run 'npm run dev -- start' to begin monitoring"
+echo "1. Edit .env with your RPC & keys"
+echo "2. SINGLE WALLET: Place keypair at ./operator-keypair.json"
+echo "3. MULTI WALLET:  Add keypair paths to operators.json"
+echo "4. Run 'npm run dev -- start' to begin monitoring"
