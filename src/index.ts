@@ -108,14 +108,22 @@ program.command('start')
     .option('-p, --port <number>', 'Webhook listener port', '3333')
     .option('-i, --interval <hours>', 'Polling interval in hours', process.env.MONITOR_INTERVAL_HOURS || '2')
     .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
+    .option('-a, --all', 'Run for all operators in operators.json', false)
     .action(async (options) => {
         const connection = new Connection(RPC_URL, 'confirmed');
-        const operator = loadKeypair(options.wallet || OPERATOR_KEYPAIR_PATH);
-        await initDbForOperator(operator.publicKey.toBase58());
+        const operators = getOperators(options);
+        const operatorAddresses = new Set(operators.map(op => op.publicKey.toBase58()));
+
+        // Initialize DB for all
+        for (const op of operators) {
+            await initDbForOperator(op.publicKey.toBase58());
+        }
+
         const intervalMs = parseFloat(options.interval) * 60 * 60 * 1000;
 
         console.log(`\n🚀 KoraScan AUTOMATIC MODE started!`);
-        console.log(`👤 Operator: ${operator.publicKey.toBase58()}`);
+        console.log(`👥 Monitoring ${operators.length} operators:`);
+        operators.forEach(op => console.log(`   - ${op.publicKey.toBase58()}`));
         console.log(`💰 Auto-Claim: ${options.claim ? 'ENABLED (Proceed with caution)' : 'DISABLED (Discovery only)'}`);
 
         // --- 1. Start Webhook Server ---
@@ -124,30 +132,32 @@ program.command('start')
         const { handleHeliusWebhook } = require('./lib/webhook-handler');
         const app = express();
         app.use(bodyParser.json());
+
         app.post('/webhook', async (req: any, res: any) => {
-            await handleHeliusWebhook(req, res, operator.publicKey.toBase58());
-            // If claim is enabled, we could trigger a check here, 
-            // but usually polling is safer for batching.
+            await handleHeliusWebhook(req, res, operatorAddresses);
         });
+
         app.listen(options.port);
         console.log(`📡 Webhook Listener: http://localhost:${options.port}/webhook`);
 
         // --- 2. Start Polling Loop ---
         const runCycle = async () => {
             console.log(`\n[${new Date().toLocaleTimeString()}] Starting polling cycle...`);
-            try {
-                // Discover via history
-                const scanner = new Discoverer(connection, operator.publicKey);
-                // Force verify on every cycle to ensure we catch external closes immediately
-                await scanner.scan({ waitForSync: true, forceVerify: true });
 
-                if (options.claim) {
-                    const whitelist = await getMergedWhitelist();
-                    const reclaimer = new Reclaimer(connection, operator, { whitelist });
-                    await reclaimer.reclaimAllEligible();
+            for (const operator of operators) {
+                try {
+                    // Discover via history
+                    const scanner = new Discoverer(connection, operator.publicKey);
+                    await scanner.scan({ waitForSync: true, forceVerify: true });
+
+                    if (options.claim) {
+                        const whitelist = await getMergedWhitelist();
+                        const reclaimer = new Reclaimer(connection, operator, { whitelist });
+                        await reclaimer.reclaimAllEligible();
+                    }
+                } catch (e: any) {
+                    console.error(`❌ Cycle failed for ${operator.publicKey.toBase58().slice(0, 8)}: ${e.message}`);
                 }
-            } catch (e: any) {
-                console.error(`❌ Cycle failed: ${e.message}`);
             }
             console.log(`😴 Sleeping for ${options.interval} hours...`);
         };
@@ -208,61 +218,18 @@ program.command('sweep')
  * 3. STATS (Analytics Mode)
  */
 program.command('stats')
-    .description('Show detailed analytics and metrics')
+    .description('Show detailed performance report card')
     .option('-w, --wallet <path>', 'Path to operator keypair file', OPERATOR_KEYPAIR_PATH)
-    .option('-a, --all', 'Show stats for all operators in operators.json', false)
+    .option('-a, --all', 'Show report for all operators in operators.json', false)
     .action(async (options) => {
+        const { generateReport } = require('./lib/report');
         const operators = getOperators(options);
-
-        let grandTotalAccounts = 0;
-        let grandTotalReclaimed = 0;
 
         for (const operator of operators) {
             await initDbForOperator(operator.publicKey.toBase58());
-            const stats: any = await getDetailedAnalytics(operator.publicKey.toBase58());
-
-            const totalReclaimed = stats.total_reclaimed_lamports / LAMPORTS_PER_SOL;
-            const totalFees = stats.total_fees_lamports / LAMPORTS_PER_SOL;
-            const netRecovery = totalReclaimed - totalFees;
-            const totalAccounts = Number(stats.total_accounts);
-
-            grandTotalAccounts += totalAccounts;
-            grandTotalReclaimed += totalReclaimed;
-
-            console.log(`\n📊 KoraScan Operator Analytics`);
-            console.log(`================================`);
-            console.log(`👤 Operator: ${operator.publicKey.toBase58()}`);
-            console.log(`📦 Total Accounts Sponsored: ${totalAccounts.toLocaleString()}`);
-            console.log(`   - 🟢 Active:   ${(stats.active_count || 0)}`);
-            console.log(`   - 🔒 Locked:   ${(stats.locked_count || 0)}`);
-            console.log(`   - 💀 Closed:   ${(stats.has_death_cert || 0)} (or external close)`);
-            console.log(`👥 Unique Users Helped:      ${stats.unique_users.toLocaleString()}`);
-            console.log(`\n💰 Financial Audit`);
-            console.log(`--------------------------------`);
-            console.log(`💵 Rent Reclaimed:           ${totalReclaimed.toFixed(4)} SOL`);
-            console.log(`💸 Fees Paid:                ${totalFees.toFixed(4)} SOL`);
-            console.log(`📈 Net Recovery:             ${netRecovery.toFixed(4)} SOL`);
-            console.log(`\n🔍 Data Audit`);
-            console.log(`--------------------------------`);
-            const birthCert = stats.has_birth_cert || 0;
-            const deathCert = stats.has_death_cert || 0;
-            console.log(`📅 Birth Certs (Timestamp):  ${birthCert.toLocaleString()} (${totalAccounts > 0 ? ((birthCert / totalAccounts) * 100).toFixed(1) : 0}%)`);
-            console.log(`💀 Death Certs (Reclaimed):  ${deathCert.toLocaleString()}`);
-
-            if (stats.top_mints && stats.top_mints.length > 0) {
-                console.log(`\n🔝 Top Sponsored Mints:`);
-                stats.top_mints.forEach((m: any) => {
-                    console.log(` - ${m.mint.slice(0, 8)}... : ${m.count} accounts`);
-                });
-            }
-        }
-
-        if (operators.length > 1) {
-            console.log(`\n════════════════════════════════`);
-            console.log(`📊 GRAND TOTAL: ${grandTotalAccounts} accounts, ${grandTotalReclaimed.toFixed(4)} SOL reclaimed`);
+            await generateReport(operator.publicKey.toBase58());
         }
     });
-
 /**
  * 4. ACTIVITY (History Mode)
  */

@@ -258,7 +258,7 @@ export class Discoverer {
 
             // Cleanup redundant check (now handled by reachedEnd above)
 
-            console.log(`${this.logPrefix} Historical scan complete. ${stats.totalAccounts} accounts total.`);
+            console.log(`${this.logPrefix} Discovery complete. ${stats.totalAccounts} accounts total.`);
         } catch (e: any) {
             console.error(`${this.logPrefix} Global scan error: ${e.message}`);
         } finally {
@@ -400,7 +400,8 @@ export class Discoverer {
             userWallet: string,
             status?: string,
             reclaimedAt?: number,
-            reclaimSignature?: string
+            reclaimSignature?: string,
+            closedAt?: number
         }[] = [];
 
         for (const res of results) {
@@ -421,6 +422,11 @@ export class Discoverer {
                     userWallet: res.userWallet,
                     status
                 };
+
+                // Safety: If it's closed or reclaimable, mark the closedAt timestamp (for Cool-Down)
+                if (status === 'closed' || status === 'reclaimable') {
+                    update.closedAt = Date.now();
+                }
 
                 if (status === 'closed') {
                     try {
@@ -544,6 +550,8 @@ export class Discoverer {
                 sponsorshipSource: original?.sponsorshipSource || 'UNKNOWN',
                 memo: original?.memo || '',
                 status: a.canReclaim ? 'reclaimable' : 'locked',
+                // Safety: Mark closedAt if reclaimable
+                closedAt: a.canReclaim ? Date.now() : undefined
             };
         });
 

@@ -8,8 +8,9 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 
 /**
  * Handle incoming Helius Enhanced Transaction webhooks
+ * Supports multi-tenant (multiple operators)
  */
-export async function handleHeliusWebhook(req: Request, res: Response, operatorAddress: string) {
+export async function handleHeliusWebhook(req: Request, res: Response, operatorAddresses: Set<string>) {
     const transactions = req.body;
 
     if (!Array.isArray(transactions)) {
@@ -22,7 +23,9 @@ export async function handleHeliusWebhook(req: Request, res: Response, operatorA
 
     for (const tx of transactions) {
         // We look for transactions where the operator is the fee payer (sponsorship)
-        if (tx.feePayer !== operatorAddress) continue;
+        if (!operatorAddresses.has(tx.feePayer)) continue;
+
+        const operatorAddress = tx.feePayer;
 
         for (const accData of tx.accountData || []) {
             const acc = accData.account;

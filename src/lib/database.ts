@@ -181,25 +181,21 @@ export async function initDb(): Promise<void> {
         // columns exist
     }
 
-    // Migration: Move legacy watched_address to new table
+    // Migration: Add closed_at, reclaimed_amount, error_message
     try {
-        const legacy = await db.execute("SELECT chat_id, watched_address FROM user_settings WHERE watched_address IS NOT NULL");
-        if (legacy.rows.length > 0) {
-            console.log(`[Database] Migrating ${legacy.rows.length} legacy watched addresses...`);
-            for (const row of legacy.rows) {
-                if (row.watched_address) {
-                    await db.execute({
-                        sql: "INSERT OR IGNORE INTO user_watched_wallets (chat_id, address) VALUES (?, ?)",
-                        args: [row.chat_id, row.watched_address]
-                    });
-                }
-            }
-            // Optional: Clear legacy column to avoid confusion, or keep as fallback
-            await db.execute("UPDATE user_settings SET watched_address = NULL");
-        }
-    } catch (e) {
-        console.warn("[Database] Legacy migration warning:", e);
-    }
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN closed_at INTEGER");
+        console.log('[Database] Migrated: Added closed_at column');
+    } catch (e) { /* ignore */ }
+
+    try {
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN reclaimed_amount INTEGER");
+        console.log('[Database] Migrated: Added reclaimed_amount column');
+    } catch (e) { /* ignore */ }
+
+    try {
+        await db.execute("ALTER TABLE sponsored_accounts ADD COLUMN error_message TEXT");
+        console.log('[Database] Migrated: Added error_message column');
+    } catch (e) { /* ignore */ }
 
     console.log('[Database] Tables initialized');
 }
@@ -221,6 +217,10 @@ export interface SponsoredAccount {
     sponsorshipSource?: string;
     memo?: string;
     status: string;
+    // New fields
+    closedAt?: number;
+    reclaimedAmount?: number;
+    errorMessage?: string;
 }
 
 async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
@@ -242,9 +242,10 @@ export async function upsertSponsoredAccount(account: SponsoredAccount): Promise
         sql: `
             INSERT INTO sponsored_accounts (
                 pubkey, operator, user_wallet, mint, type, rent_paid, signature, slot, initial_timestamp, 
-                reclaimed_at, reclaim_signature, sponsorship_source, memo, status, last_checked
+                reclaimed_at, reclaim_signature, sponsorship_source, memo, status, last_checked,
+                closed_at, reclaimed_amount, error_message
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pubkey) DO UPDATE SET
                 status = excluded.status,
                 last_checked = excluded.last_checked,
@@ -252,29 +253,33 @@ export async function upsertSponsoredAccount(account: SponsoredAccount): Promise
                 reclaimed_at = COALESCE(excluded.reclaimed_at, reclaimed_at),
                 reclaim_signature = COALESCE(excluded.reclaim_signature, reclaim_signature),
                 sponsorship_source = COALESCE(excluded.sponsorship_source, sponsorship_source),
-                memo = COALESCE(excluded.memo, memo)
+                memo = COALESCE(excluded.memo, memo),
+                closed_at = COALESCE(closed_at, excluded.closed_at), -- Preserve existing closed_at
+                reclaimed_amount = COALESCE(excluded.reclaimed_amount, reclaimed_amount),
+                error_message = COALESCE(excluded.error_message, error_message)
         `,
         args: [
             account.pubkey, account.operator, account.userWallet, account.mint, account.type,
             account.rentPaid, account.signature, account.slot, account.initialTimestamp || 0,
             account.reclaimedAt || null, account.reclaimSignature || null,
             account.sponsorshipSource || null, account.memo || null,
-            account.status, Date.now()
+            account.status, Date.now(),
+            account.closedAt || null, account.reclaimedAmount || null, account.errorMessage || null
         ]
     }));
 }
 
 export async function batchUpsertAccounts(accounts: SponsoredAccount[]): Promise<void> {
     if (accounts.length === 0) return;
-
     const db = getClient();
     const batch = accounts.map(acc => ({
         sql: `
             INSERT INTO sponsored_accounts (
                 pubkey, operator, user_wallet, mint, type, rent_paid, signature, slot, initial_timestamp, 
-                reclaimed_at, reclaim_signature, sponsorship_source, memo, status, last_checked
+                reclaimed_at, reclaim_signature, sponsorship_source, memo, status, last_checked,
+                closed_at, reclaimed_amount, error_message
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pubkey) DO UPDATE SET
                 status = excluded.status,
                 last_checked = excluded.last_checked,
@@ -282,19 +287,26 @@ export async function batchUpsertAccounts(accounts: SponsoredAccount[]): Promise
                 reclaimed_at = COALESCE(excluded.reclaimed_at, reclaimed_at),
                 reclaim_signature = COALESCE(excluded.reclaim_signature, reclaim_signature),
                 sponsorship_source = COALESCE(excluded.sponsorship_source, sponsorship_source),
-                memo = COALESCE(excluded.memo, memo)
+                memo = COALESCE(excluded.memo, memo),
+                closed_at = COALESCE(closed_at, excluded.closed_at), -- Preserve existing closed_at
+                reclaimed_amount = COALESCE(excluded.reclaimed_amount, reclaimed_amount),
+                error_message = COALESCE(excluded.error_message, error_message)
         `,
         args: [
             acc.pubkey, acc.operator, acc.userWallet, acc.mint, acc.type,
             acc.rentPaid, acc.signature, acc.slot, acc.initialTimestamp || 0,
             acc.reclaimedAt || null, acc.reclaimSignature || null,
             acc.sponsorshipSource || null, acc.memo || null,
-            acc.status, Date.now()
+            acc.status, Date.now(),
+            acc.closedAt || null, acc.reclaimedAmount || null, acc.errorMessage || null
         ]
     }));
 
     await withRetry(() => db.batch(batch));
 }
+
+
+// ... exports ...
 
 export async function getAccountsForOperator(operator: string): Promise<SponsoredAccount[]> {
     const db = getClient();
@@ -318,6 +330,9 @@ export async function getAccountsForOperator(operator: string): Promise<Sponsore
         sponsorshipSource: row.sponsorship_source as string,
         memo: row.memo as string,
         status: row.status as string,
+        closedAt: row.closed_at as number,
+        reclaimedAmount: row.reclaimed_amount as number,
+        errorMessage: row.error_message as string,
     }));
 }
 
@@ -343,6 +358,9 @@ export async function getAllAccounts(operator: string): Promise<SponsoredAccount
         sponsorshipSource: row.sponsorship_source as string,
         memo: row.memo as string,
         status: row.status as string,
+        closedAt: row.closed_at as number,
+        reclaimedAmount: row.reclaimed_amount as number,
+        errorMessage: row.error_message as string,
     }));
 }
 
@@ -376,7 +394,10 @@ export async function batchUpdateAccountMetadata(updates: {
     status?: string,
     initialTimestamp?: number,
     sponsorshipSource?: string,
-    memo?: string
+    memo?: string,
+    reclaimedAmount?: number,
+    errorMessage?: string,
+    closedAt?: number
 }[]): Promise<void> {
     if (updates.length === 0) return;
     const db = getClient();
@@ -388,6 +409,9 @@ export async function batchUpdateAccountMetadata(updates: {
                 initial_timestamp = COALESCE(?, initial_timestamp),
                 sponsorship_source = COALESCE(?, sponsorship_source),
                 memo = COALESCE(?, memo),
+                reclaimed_amount = COALESCE(?, reclaimed_amount),
+                error_message = COALESCE(?, error_message),
+                closed_at = COALESCE(closed_at, ?), -- Preserve existing
                 last_checked = ? 
               WHERE pubkey = ?`,
         args: [
@@ -397,6 +421,9 @@ export async function batchUpdateAccountMetadata(updates: {
             u.initialTimestamp || null,
             u.sponsorshipSource || null,
             u.memo || null,
+            u.reclaimedAmount || null,
+            u.errorMessage || null,
+            u.closedAt || null,
             Date.now(),
             u.pubkey
         ]

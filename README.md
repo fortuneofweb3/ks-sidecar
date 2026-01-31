@@ -4,7 +4,12 @@ The engine behind KoraScan. A powerful, local-first tool for Kora operators to d
 
 ## Features
 
-- ⚡ **Optimized Discovery**: Uses `SET_AUTHORITY` transaction history to find 100% of sponsored accounts.
+- ⚡ **Automated Discovery**: Finds `SetAuthority` transactions where you sponsored the account.
+- **Safety First**:
+  - **Double-Tap Verification**: Verifies `balance == 0` on-chain immediately before signing.
+  - **Cool-Down Period**: Optional 7-day wait for closed accounts.
+  - **Circuit Breaker**: Auto-aborts if a single batch exceeds 1 SOL.
+- **Privacy Focused**: Keys never leave your server. Simulation runs locally.
 - 💼 **Multi-Wallet Support**: Manage multiple operator keypairs easily with the `--wallet` flag.
 - 💰 **Automated Reclaiming**: Batch reclamation of empty token accounts.
 - 📊 **Local Database**: All data is stored locally in SQLite for privacy and speed.
@@ -68,8 +73,25 @@ npm run dev -- stats --wallet ./another-wallet.json
 | --- | --- |
 | `HELIUS_API_KEY` | **Required**. Your Helius API key for RPC and History API. |
 | `RPC_URL` | Optional. Custom RPC URL (defaults to Helius). |
+| `MONITOR_INTERVAL_HOURS` | `2` | Interval for `start` mode loop (hours) |
+| `RECLAIM_COOL_DOWN_DAYS` | `7` | **Safety:** Days to wait after account closure before reclaiming. |
+| `RECLAIM_CIRCUIT_BREAKER_SOL` | `1.0` | **Safety:** Max SOL allowed per batch. If exceeded, batch aborts. |
+| `TREASURY_WALLET` | - | **Pro:** Auto-forward profits to this cold wallet. |
+| `TREASURY_MIN_SOL` | `0.5` | **Pro:** Min hot wallet balance to keep before forwarding. |
 | `DATABASE_URL` | Path to local SQLite DB (default: `file:korascan_local.db`). |
 | `DRY_RUN` | If `true`, simulates actions without sending TXs. |
+
+### Pro Tools
+
+**Performance Report Card**
+Generate a detailed efficiency report without leaving your terminal:
+\`\`\`bash
+npm run dev -- report
+\`\`\`
+Outputs a summary of efficiency, ROI, and top leak sources.
+
+**Treasury Auto-Forwarding**
+Protect your profits by automatically sweeping excess SOL to a cold wallet. Set `TREASURY_WALLET` in your `.env`.
 
 ---
 **Built for Kora Operators.**
