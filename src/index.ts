@@ -27,7 +27,9 @@ function loadKeypair(keypairPath: string): Keypair {
         // Resolve relative paths from sidecar directory
         const resolvedPath = path.isAbsolute(keypairPath)
             ? keypairPath
-            : path.resolve(__dirname, '..', keypairPath);
+            : fs.existsSync(keypairPath)
+                ? path.resolve(keypairPath)
+                : path.resolve(__dirname, '..', keypairPath);
         const secretKey = JSON.parse(fs.readFileSync(resolvedPath, 'utf-8'));
         return Keypair.fromSecretKey(new Uint8Array(secretKey));
     } catch (e) {
