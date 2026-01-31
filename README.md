@@ -12,7 +12,7 @@ The secure, local-first rent reclamation engine for Kora operators. Powered by *
 - [Environment Variables](#environment-variables)
 - [Safety Features](#safety-features)
 - [Multi-Wallet Support](#multi-wallet-support)
-- [How Kora Works (Deep Dive)](../HOW_KORA_WORKS.md)
+- [How Kora Works (Deep Dive)](./HOW_KORA_WORKS.md)
 
 ---
 
