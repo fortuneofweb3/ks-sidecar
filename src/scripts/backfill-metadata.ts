@@ -1,7 +1,7 @@
 
 import { Connection } from '@solana/web3.js';
 import { getClient, batchUpdateAccountMetadata } from '../lib/database';
-import { heliusClient } from '../lib/helius';
+import { discoveryClient } from '../lib/rpc';
 import { ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
 async function main() {
@@ -32,7 +32,7 @@ async function main() {
     for (const chunk of chunks) {
         console.log(`Processing batch of ${chunk.length}...`);
         try {
-            const txs = await heliusClient.parseTransactions(chunk);
+            const txs = await discoveryClient.parseTransactions(chunk);
 
             const updates: any[] = [];
 

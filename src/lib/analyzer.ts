@@ -1,10 +1,10 @@
 import { Connection, PublicKey, GetProgramAccountsFilter } from '@solana/web3.js';
 import { AccountLayout, ACCOUNT_SIZE, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { DiscoveredAccount } from './discoverer';
-import { HeliusClient } from './helius';
+import { DiscoveryClient } from './rpc';
 
 const TOKEN_PROGRAM_STR = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-const TOKEN_2022_PROGRAM_STR = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+const TOKEN_2022_PROGRAM_STR = 'TokenzQdBNbAtYpYbt9UEHJR9YWYvNf2t8S77tB39L';
 
 export interface ReclaimableAccount {
     pubkey: string;
@@ -30,9 +30,9 @@ export class Analyzer {
     connection: Connection;
     operatorAddress: PublicKey;
     silent: boolean;
-    heliusClient: HeliusClient | null;
+    heliusClient: DiscoveryClient | null;
 
-    constructor(connection: Connection, operatorAddress: PublicKey, silent = false, heliusClient: HeliusClient | null = null) {
+    constructor(connection: Connection, operatorAddress: PublicKey, silent = false, heliusClient: DiscoveryClient | null = null) {
         this.connection = connection;
         this.operatorAddress = operatorAddress;
         this.silent = silent;

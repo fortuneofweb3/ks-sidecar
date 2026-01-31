@@ -13,9 +13,10 @@ import {
 } from './lib/database';
 import { Discoverer } from './lib/discoverer';
 import { Reclaimer } from './lib/reclaimer';
+import { getActiveRpcUrl } from './lib/rpc';
 
 // Configuration
-const RPC_URL = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
+const RPC_URL = getActiveRpcUrl();
 const OPERATOR_KEYPAIR_PATH = process.env.OPERATOR_KEYPAIR_PATH || './operator-keypair.json';
 const OPERATORS_CONFIG_PATH = process.env.OPERATORS_CONFIG_PATH || './operators.json';
 

@@ -1,5 +1,5 @@
 import { Connection, PublicKey } from '@solana/web3.js';
-import { HeliusClient, HeliusTransaction } from './helius';
+import { DiscoveryClient, DiscoveryTransaction } from './rpc';
 import * as database from './database';
 import { Analyzer } from './analyzer';
 
@@ -39,7 +39,7 @@ const ACTIVE_SCANS = new Set<string>();
 export class Discoverer {
     connection: Connection;
     operatorAddress: PublicKey;
-    heliusClient: HeliusClient;
+    heliusClient: DiscoveryClient;
     analyzer: Analyzer;
     private logPrefix: string;
     private cachedRent: number | null = null;
@@ -48,7 +48,7 @@ export class Discoverer {
         const opStr = operatorAddress.toBase58();
         this.connection = connection;
         this.operatorAddress = operatorAddress;
-        this.heliusClient = new HeliusClient();
+        this.heliusClient = new DiscoveryClient();
         this.analyzer = new Analyzer(connection, operatorAddress, true, this.heliusClient); // SILENT BY DEFAULT
         this.logPrefix = `[Discoverer:${opStr.slice(0, 6)}...]`;
     }
@@ -120,8 +120,6 @@ export class Discoverer {
         return { fromCache: false, accounts, stats, checkpoint };
     }
 
-
-
     /**
      * Comprehensive scan - fetches history incrementally
      */
@@ -172,7 +170,7 @@ export class Discoverer {
                     const txs = await this.heliusClient.getTransactionHistory(operator, {
                         limit: 100,
                         before,
-                        type: 'SET_AUTHORITY'
+                        connection: this.connection
                     });
                     if (txs.length === 0) {
                         reachedEnd = true;
@@ -196,7 +194,7 @@ export class Discoverer {
 
                         // Save fee immediately (it's cheap)
                         if (tx.feePayer === operator) {
-                            await database.addOperatorFee(tx.signature, operator, tx.fee, tx.timestamp, tx.type, tx.slot);
+                            await database.addOperatorFee(tx.signature, operator, tx.fee, (tx.timestamp || 0) * 1000, tx.type, tx.slot);
                         }
                     }
 
@@ -256,8 +254,6 @@ export class Discoverer {
                 firstScanComplete: reachedEnd,
             });
 
-            // Cleanup redundant check (now handled by reachedEnd above)
-
             console.log(`${this.logPrefix} Discovery complete. ${stats.totalAccounts} accounts total.`);
         } catch (e: any) {
             console.error(`${this.logPrefix} Global scan error: ${e.message}`);
@@ -293,12 +289,12 @@ export class Discoverer {
                 const txs = await this.heliusClient.getTransactionHistory(operator, {
                     limit: 100,
                     before,
-                    type: 'SET_AUTHORITY' // Kora often uses SET_AUTHORITY for sponsorship
+                    connection: this.connection
                 });
                 if (txs.length === 0) break;
 
                 // Stop if we hit our newest known signature
-                const hitCheckpoint = txs.findIndex(t => t.signature === checkpoint.newestSignature);
+                const hitCheckpoint = txs.findIndex((t: DiscoveryTransaction) => t.signature === checkpoint.newestSignature);
                 const relevantTxs = hitCheckpoint >= 0 ? txs.slice(0, hitCheckpoint) : txs;
 
                 if (relevantTxs.length === 0) break;
@@ -313,7 +309,7 @@ export class Discoverer {
                     foundNew.push(...accounts);
 
                     if (tx.feePayer === operator) {
-                        await database.addOperatorFee(tx.signature, operator, tx.fee, tx.timestamp, tx.type, tx.slot);
+                        await database.addOperatorFee(tx.signature, operator, tx.fee, (tx.timestamp || 0) * 1000, tx.type, tx.slot);
                     }
                 }
 
@@ -430,7 +426,10 @@ export class Discoverer {
 
                 if (status === 'closed') {
                     try {
-                        const history = await this.heliusClient.getTransactionHistory(res.pubkey, { limit: 1 });
+                        const history = await this.heliusClient.getTransactionHistory(res.pubkey, {
+                            limit: 1,
+                            connection: this.connection
+                        });
                         if (history.length > 0) {
                             const last = history[0];
                             update.reclaimedAt = (last.timestamp || 0) * 1000;
@@ -449,7 +448,7 @@ export class Discoverer {
         return { hasMore: active.length === limit, updated: updates.length };
     }
 
-    private processTransaction(tx: HeliusTransaction): DiscoveredAccount[] {
+    private processTransaction(tx: DiscoveryTransaction): DiscoveredAccount[] {
         const operatorStr = this.operatorAddress.toBase58();
         const found: DiscoveredAccount[] = [];
 
@@ -490,8 +489,17 @@ export class Discoverer {
                         type = (accounts[5] === TOKEN_2022_PROGRAM_ID) ? 'token-2022' : 'token';
                         break;
                     }
-                    // Generic pattern might still be here, but SET_AUTHORITY transactions 
-                    // usually have the account in the instructions list if they are relevant.
+                }
+            }
+
+            // Secondary search via token balance changes (especially for Standard Mode/SET_AUTHORITY)
+            if (!mint || !userWallet) {
+                const accEntry = tx.accountData?.find(a => a.account === acc);
+                if (accEntry && accEntry.tokenBalanceChanges?.length > 0) {
+                    const tb = accEntry.tokenBalanceChanges[0];
+                    if (!mint) mint = tb.mint;
+                    if (!userWallet) userWallet = tb.userWallet;
+                    if (type === 'system') type = 'token'; // Promoted to token if we see balance changes
                 }
             }
 
@@ -514,7 +522,7 @@ export class Discoverer {
                     rentPaid: balanceChange,
                     signature: tx.signature,
                     slot: tx.slot,
-                    timestamp: tx.timestamp,
+                    timestamp: (tx.timestamp || 0) * 1000,
                     sponsorshipSource: tx.source || 'UNKNOWN',
                     memo: ''
                 });

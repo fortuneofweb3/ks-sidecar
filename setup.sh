@@ -17,7 +17,7 @@ npm install
 if [ ! -f .env ]; then
     echo "📄 Creating .env file..."
     cp .env.example .env
-    echo "⚠️  Please edit .env and add your HELIUS_API_KEY and RPC_URL."
+    echo "⚠️  Please edit .env and add an API key for HELIUS, TRITON, QUICKNODE, or ALCHEMY."
 fi
 
 # 4. Initialize Multi-Wallet Config
@@ -34,7 +34,7 @@ echo ""
 echo "✅ Setup complete!"
 echo "----------------"
 echo "Next steps:"
-echo "1. Edit .env with your RPC & keys"
+echo "1. Edit .env and add your provider API key (Helius/Triton/Quicknode/Alchemy)"
 echo "2. SINGLE WALLET: Place keypair at ./operator-keypair.json"
 echo "3. MULTI WALLET:  Add keypair paths to operators.json"
 echo "4. Run 'npm run dev -- start' to begin monitoring"
