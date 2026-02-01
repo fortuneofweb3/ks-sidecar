@@ -86,7 +86,10 @@ async function getMergedWhitelist(): Promise<string[]> {
 
 program
     .name('korascan')
-    .description('KoraScan Sidecar - Unified Solana Rent Reclaimer')
+    .description(
+        'KoraScan Sidecar - Unified Solana Rent Reclaimer\n' +
+        'For programmatic access, use: npm install korascan-sdk'
+    )
     .version('1.1.0');
 
 program.command('init')
